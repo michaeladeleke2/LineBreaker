@@ -140,7 +140,7 @@ def _lineup_badge(lineup_info):
     proj   = "" if confirmed else " (proj)"
     return (f'&nbsp;&middot;&nbsp;<span style="background:{bg};color:{tc};border:1px solid {tc}44;'
             f'border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;letter-spacing:1px;'
-            f'text-transform:uppercase;vertical-align:middle;">{lbl}{proj}</span>')
+            f'text-transform:uppercase;vertical-align:middle;white-space:nowrap;">{lbl}{proj}</span>')
 
 
 def _inj_badge(inj_info):
@@ -158,7 +158,7 @@ def _inj_badge(inj_info):
     tip   = f' title="{desc}"' if desc else ""
     return (f'&nbsp;&middot;&nbsp;<span{tip} style="background:{bg};color:{tc};border:1px solid {tc}44;'
             f'border-radius:4px;padding:1px 5px;font-size:9px;font-weight:700;letter-spacing:1px;'
-            f'text-transform:uppercase;vertical-align:middle;">{lbl}</span>')
+            f'text-transform:uppercase;vertical-align:middle;white-space:nowrap;">{lbl}</span>')
 
 def _svg_court():
     return """<svg viewBox="0 0 400 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;opacity:0.035;">
@@ -242,6 +242,7 @@ if "season_refreshed" not in st.session_state:
     today_slate   = load_slate()
     team_records  = load_records()
     injury_df     = load_injuries()
+    lineup_df     = load_lineups()
     st.session_state["season_refreshed"] = True
     overlay.empty()  # Remove overlay — page appears fully loaded
 else:
@@ -251,6 +252,7 @@ else:
     today_slate   = load_slate()
     team_records  = load_records()
     injury_df     = load_injuries()
+    lineup_df     = load_lineups()
 
 player_options = players_df["full_name"].tolist()
 team_options   = teams_df["team_abbreviation"].tolist()
@@ -383,11 +385,11 @@ with nba_tab:
 
         # ── System buttons ────────────────────────────────────────────────────
         st.markdown(
-            "<div style='height:1px;background:#13131f;margin:1rem 0 0.8rem;'></div>",
+            "<div style='height:1px;background:#1e1e2e;margin:1rem 0 0.8rem;'></div>",
             unsafe_allow_html=True)
         st.markdown(
             '<span style="font-size:0.55rem;font-weight:700;letter-spacing:0.16em;'
-            'text-transform:uppercase;color:#1e1e28;">System</span>',
+            'text-transform:uppercase;color:#3a3a4a;display:block;margin-bottom:0.4rem;">System</span>',
             unsafe_allow_html=True)
 
         c1, c2 = st.columns(2)
@@ -398,8 +400,8 @@ with nba_tab:
                     ok = refresh_current_season()
                     st.cache_data.clear()
                     st.session_state.pop("season_refreshed", None)
-                if ok: st.toast("Game data synced!", icon="✅")
-                else:  st.toast("Sync failed", icon="❌")
+                if ok: st.success("✅ Game data synced!")
+                else:  st.error("❌ Sync failed")
 
             if st.button("🏥 Injuries", use_container_width=True,
                          help="Refresh ESPN injury report"):
@@ -408,9 +410,9 @@ with nba_tab:
                         from data.fetch_injuries import fetch_injury_report
                         fetch_injury_report(force_refresh=True)
                         load_injuries.clear()
-                        st.toast("Injuries updated!", icon="✅")
+                        st.success("✅ Injuries updated!")
                     except Exception as e:
-                        st.toast(f"Failed: {e}", icon="❌")
+                        st.error(f"❌ {e}")
 
         with c2:
             if st.button("📋 Lineups", use_container_width=True,
@@ -420,9 +422,9 @@ with nba_tab:
                         from data.fetch_lineups import fetch_all_lineups
                         fetch_all_lineups(force_refresh=True)
                         load_lineups.clear()
-                        st.toast("Lineups updated!", icon="✅")
+                        st.success("✅ Lineups updated!")
                     except Exception as e:
-                        st.toast(f"Failed: {e}", icon="❌")
+                        st.error(f"❌ {e}")
 
             if st.button("🤖 Retrain", use_container_width=True,
                          help="Retrain all models (~15 min, runs in background)"):
@@ -434,9 +436,9 @@ with nba_tab:
                         [sys.executable, retrain_path, "--force"],
                         stdout=open(ROOT / "logs" / "retrain.log", "a"),
                         stderr=subprocess.STDOUT, cwd=str(ROOT))
-                    st.toast("Retraining started — check logs/retrain.log", icon="🤖")
+                    st.info("🤖 Retraining started in background")
                 except Exception as e:
-                    st.toast(f"Failed: {e}", icon="❌")
+                    st.error(f"❌ {e}")
 
         if st.button("📊 Backtest (30d)", use_container_width=True,
                      help="Check prediction accuracy vs actual results"):
@@ -459,7 +461,7 @@ with nba_tab:
             if _mp.exists():
                 _m = _json.load(open(_mp))
                 st.markdown(
-                    f'<div style="font-size:0.52rem;color:#1a1a28;margin-top:0.5rem;">'
+                    f'<div style="font-size:0.52rem;color:#2a2a3a;margin-top:0.5rem;">'
                     f'Models: {_m.get("trained_at","?")[:10]} &nbsp;·&nbsp; {_m.get("n_models","?")} targets</div>',
                     unsafe_allow_html=True)
         except: pass
@@ -499,6 +501,8 @@ with nba_tab:
                         opponent_name=sel_opp,
                         is_home=(location=="Home"),
                         rest_days=rest_days,
+                        preloaded_injury_df=injury_df,
+                        preloaded_lineup_df=lineup_df if 'lineup_df' in dir() else None,
                     )
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
@@ -620,7 +624,7 @@ with nba_tab:
             /* Hero number row */
             .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid #0d0d15;}}
             .proj{{flex:0 0 auto;}}
-            .pnum{{font-family:'Bebas Neue',sans-serif;font-size:96px;line-height:0.85;color:{pc};
+            .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{pc};
                     text-shadow:0 0 60px {pc}44;letter-spacing:0.01em;}}
             .plbl{{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#1e1e28;margin-top:6px;}}
             /* Stats grid */

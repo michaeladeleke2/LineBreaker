@@ -239,9 +239,11 @@ def fetch_today_slate() -> list:
 
 # ── Team standings (for records) ──────────────────────────────────────────────
 
-def fetch_team_records(season: str = "2024-25") -> dict:
+def fetch_team_records(season: str = None) -> dict:
     """Returns dict of team_abbr -> 'W-L' string."""
     try:
+        if season is None:
+            season = CURRENT_SEASON
         standings = _retry(
             lambda: leaguestandings.LeagueStandings(
                 season=season,
@@ -251,10 +253,14 @@ def fetch_team_records(season: str = "2024-25") -> dict:
         standings.columns = [c.lower() for c in standings.columns]
         result = {}
         for _, r in standings.iterrows():
-            abbr = r.get("teamslug","") or r.get("team","")
-            w    = r.get("wins", r.get("w",""))
-            l    = r.get("losses", r.get("l",""))
-            if abbr:
+            # Try multiple column names for abbreviation
+            abbr = (r.get("teamabbreviation","") or
+                    r.get("team_abbreviation","") or
+                    r.get("teamslug","") or
+                    r.get("team",""))
+            w = r.get("wins", r.get("w", r.get("winslosses","").split("-")[0] if "-" in str(r.get("winslosses","")) else ""))
+            l = r.get("losses", r.get("l", r.get("winslosses","").split("-")[1] if "-" in str(r.get("winslosses","")) else ""))
+            if abbr and str(w).strip() and str(l).strip():
                 result[str(abbr).upper()] = f"{w}-{l}"
         return result
     except Exception as e:
