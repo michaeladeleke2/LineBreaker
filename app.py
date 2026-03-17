@@ -384,13 +384,8 @@ with nba_tab:
         run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
 
         # ── System buttons ────────────────────────────────────────────────────
-        st.markdown(
-            "<div style='height:1px;background:#1e1e2e;margin:1rem 0 0.8rem;'></div>",
-            unsafe_allow_html=True)
-        st.markdown(
-            '<span style="font-size:0.55rem;font-weight:700;letter-spacing:0.16em;'
-            'text-transform:uppercase;color:#3a3a4a;display:block;margin-bottom:0.4rem;">System</span>',
-            unsafe_allow_html=True)
+        st.divider()
+        st.caption("SYSTEM")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -501,8 +496,6 @@ with nba_tab:
                         opponent_name=sel_opp,
                         is_home=(location=="Home"),
                         rest_days=rest_days,
-                        preloaded_injury_df=injury_df,
-                        preloaded_lineup_df=lineup_df if 'lineup_df' in dir() else None,
                     )
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
