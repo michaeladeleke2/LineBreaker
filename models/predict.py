@@ -234,10 +234,10 @@ def predict(
             model_auc        = target_meta.get("cls_cv_auc", 0.0),
         )
 
-    # ── Injury + lineup adjustment ───────────────────────────────────────────
+    # ── Injury + lineup adjustment (use preloaded data to avoid re-fetching) ──
     try:
-        injury_df  = fetch_injury_report()
-        inj_status = get_player_injury(player_name, injury_df)
+        _inj_df    = preloaded_injury_df if preloaded_injury_df is not None else fetch_injury_report()
+        inj_status = get_player_injury(player_name, _inj_df)
         inj_mult   = inj_status["multiplier"]
         inj_info   = inj_status
     except Exception:
@@ -245,8 +245,8 @@ def predict(
         inj_info = {"status": "unknown", "multiplier": 1.0, "description": ""}
 
     try:
-        lineup_df   = fetch_all_lineups()
-        lu_status   = get_player_lineup_status(player_name, lineup_df)
+        _lu_df      = preloaded_lineup_df if preloaded_lineup_df is not None else fetch_all_lineups()
+        lu_status   = get_player_lineup_status(player_name, _lu_df)
         lu_mult     = lu_status["multiplier"]
         lineup_info = lu_status
     except Exception:
