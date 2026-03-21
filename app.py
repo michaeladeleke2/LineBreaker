@@ -36,6 +36,20 @@ except ImportError:
     def fetch_today_odds(): return {}
 
 try:
+    from data.accuracy_tracker import (
+        auto_resolve_from_espn, get_accuracy_trend,
+        get_all_predictions as get_all_preds_full,
+    )
+    from data.fetch_boxscores import get_team_defensive_rankings
+    AUTORESOLVE_ENABLED = True
+except ImportError:
+    AUTORESOLVE_ENABLED = False
+    def auto_resolve_from_espn(): return 0
+    def get_accuracy_trend(*a, **k): return []
+    def get_all_preds_full(): return []
+    def get_team_defensive_rankings(*a): return {}
+
+try:
     from models.predict import get_matchup_history
     MATCHUP_ENABLED = True
 except ImportError:
@@ -236,6 +250,22 @@ def _svg_field():
   <line x1="288" y1="0" x2="288" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
 </svg>"""
 
+def _kelly(over_prob: float, edge_abs: float, line: float, bankroll: float = 1000.0) -> dict:
+    """Kelly criterion bet sizing. Returns {fraction, units, dollars}."""
+    try:
+        p = max(0.01, min(0.99, over_prob / 100))
+        q = 1 - p
+        # Standard -110 odds → decimal 1.909
+        b = 0.909
+        kelly_f = max(0.0, (b * p - q) / b)
+        # Quarter-Kelly for safety
+        safe_f  = kelly_f * 0.25
+        dollars = round(safe_f * bankroll, 2)
+        units   = round(safe_f * bankroll / 100, 2)  # assume 1u = $100
+        return {"fraction": round(safe_f * 100, 1), "dollars": dollars, "units": units}
+    except Exception:
+        return {"fraction": 0.0, "dollars": 0.0, "units": 0.0}
+
 def _dfs_points(pred_dict: dict) -> float:
     """DraftKings DFS scoring: PTS×1 + REB×1.25 + AST×1.5 + STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5"""
     try:
@@ -348,6 +378,16 @@ else:
 
 player_options = players_df["full_name"].tolist()
 team_options   = teams_df["team_abbreviation"].tolist()
+
+# Load defensive rankings (non-blocking)
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_def_rankings():
+    try:
+        fm_path = ROOT / "data" / "cache" / "feature_matrix.csv"
+        return get_team_defensive_rankings(fm_path)
+    except Exception:
+        return {}
+DEF_RANKINGS = load_def_rankings()
 
 stat_options, stat_map = [], {}
 for group in TARGET_GROUPS:
@@ -928,6 +968,136 @@ with nba_tab:
 
             components.html(html, height=630, scrolling=False)
 
+            # ── Contextual alerts (def rank, pace, injury cascade) ────────────────
+            alert_msgs = []
+
+            # Defensive rank context
+            def_info = DEF_RANKINGS.get(sel_opp)
+            if def_info:
+                rank = def_info["rank"]
+                pts_allowed = def_info["pts_allowed"]
+                rank_label = (
+                    "elite defense" if rank <= 5 else
+                    "strong defense" if rank <= 10 else
+                    "average defense" if rank <= 20 else
+                    "weak defense"
+                )
+                rank_c = "#e05a5a" if rank <= 5 else "#d4b44a" if rank <= 15 else "#4caf82"
+                alert_msgs.append(
+                    f'<span style="color:{rank_c};font-weight:700;">🛡 {sel_opp} #{rank} defense</span>'
+                    f' ({rank_label}, {pts_allowed} PTS/g allowed)'
+                )
+
+            # Pace / blowout warning from today's odds
+            if LINES_ENABLED:
+                try:
+                    today_odds = fetch_today_odds()
+                    opp_odds   = today_odds.get(sel_opp, {})
+                    spread     = opp_odds.get("spread")
+                    if spread is not None and abs(float(spread)) >= 12:
+                        alert_msgs.append(
+                            f'⚠️ <span style="color:#d4b44a;">Potential blowout (spread {spread:+.1f}) — bench time may suppress stats</span>'
+                        )
+                except Exception:
+                    pass
+
+            # Injury cascade — check if key teammates are out
+            try:
+                player_team = str(p_row.get("team_abbreviation", "")).upper()
+                teammates = players_df[
+                    (players_df["team_abbreviation"] == player_team) &
+                    (players_df["full_name"] != sel_player)
+                ].head(8)
+                if not injury_df.empty and not teammates.empty:
+                    from data.fetch_injuries import get_player_injury
+                    for _, tm in teammates.iterrows():
+                        inj = get_player_injury(injury_df, tm["full_name"])
+                        if inj and inj.get("status", "").lower() in ("out", "doubtful"):
+                            alert_msgs.append(
+                                f'📈 <span style="color:#4caf82;font-weight:700;">{tm["full_name"]} ({inj["status"].upper()})</span>'
+                                f' — teammate absence may boost {sel_player.split()[-1]}\'s role'
+                            )
+            except Exception:
+                pass
+
+            if alert_msgs:
+                alerts_html = "".join(
+                    f'<div style="font-size:0.7rem;margin-bottom:0.35rem;">{m}</div>'
+                    for m in alert_msgs
+                )
+                st.markdown(
+                    f'<div style="background:#0d0d15;border:1px solid #1a1a28;border-radius:10px;'
+                    f'padding:0.75rem 1rem;margin-bottom:0.6rem;">{alerts_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Kelly criterion ───────────────────────────────────────────────────
+            with st.expander("💰  Kelly Criterion Bet Sizing", expanded=False):
+                kelly_bankroll = st.number_input(
+                    "Bankroll ($)", min_value=50, max_value=100000,
+                    value=1000, step=50, key="kelly_bankroll"
+                )
+                kelly = _kelly(op, edge_abs, custom_line, bankroll=kelly_bankroll)
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Quarter-Kelly %", f"{kelly['fraction']}%")
+                k2.metric("Bet Amount", f"${kelly['dollars']}")
+                k3.metric("Units", f"{kelly['units']}u")
+                st.caption("Quarter-Kelly (25% of full Kelly) used for safety. Win prob from model edge.")
+
+            # ── Season performance heatmap ────────────────────────────────────────
+            with st.expander("📅  Season Heatmap", expanded=False):
+                try:
+                    all_gl = result.recent_games
+                    if not all_gl.empty and sel_target in all_gl.columns or True:
+                        # Get more games for heatmap
+                        from data.fetch_data import get_player_gamelogs
+                        gl_full = get_player_gamelogs(int(p_row["id"]), season="2025-26")
+                        if gl_full is not None and not gl_full.empty:
+                            from features.engineer import COMBO_TARGETS as _CT
+                            if sel_target in _CT:
+                                parts = [p for p in _CT[sel_target] if p in gl_full.columns]
+                                gl_full["_hm_val"] = gl_full[parts].apply(pd.to_numeric, errors="coerce").sum(axis=1) if parts else 0
+                            elif sel_target in gl_full.columns:
+                                gl_full["_hm_val"] = pd.to_numeric(gl_full[sel_target], errors="coerce")
+                            else:
+                                gl_full["_hm_val"] = 0
+                            gl_full = gl_full.dropna(subset=["_hm_val"]).tail(30)
+                            if not gl_full.empty:
+                                mn_v  = gl_full["_hm_val"].min()
+                                mx_v  = gl_full["_hm_val"].max()
+                                rng_v = max(mx_v - mn_v, 1)
+                                cells = ""
+                                for _, gr in gl_full.iterrows():
+                                    v    = float(gr["_hm_val"])
+                                    hit  = v >= custom_line
+                                    norm = (v - mn_v) / rng_v
+                                    # Green gradient for hits, red for misses
+                                    if hit:
+                                        bg = f"rgba(76,175,130,{0.2 + norm*0.6:.2f})"
+                                        fc = "#4caf82"
+                                    else:
+                                        bg = f"rgba(224,90,90,{0.15 + (1-norm)*0.4:.2f})"
+                                        fc = "#e05a5a"
+                                    try:
+                                        gd_lbl = pd.to_datetime(gr.get("game_date","")).strftime("%-m/%-d")
+                                    except Exception:
+                                        gd_lbl = ""
+                                    cells += (
+                                        f'<div style="background:{bg};border-radius:6px;padding:6px 4px;'
+                                        f'text-align:center;min-width:44px;">'
+                                        f'<div style="font-family:\'Bebas Neue\',sans-serif;font-size:1rem;color:{fc};">{int(v)}</div>'
+                                        f'<div style="font-size:8px;color:#1a1a28;">{gd_lbl}</div>'
+                                        f'</div>'
+                                    )
+                                st.markdown(
+                                    f'<div style="display:flex;flex-wrap:wrap;gap:6px;padding:0.5rem 0;">{cells}</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                hit_count = sum(1 for _, gr in gl_full.iterrows() if float(gr["_hm_val"]) >= custom_line)
+                                st.caption(f"Last {len(gl_full)} games — {hit_count}/{len(gl_full)} over {custom_line} ({hit_count/len(gl_full)*100:.0f}% hit rate)")
+                except Exception:
+                    st.caption("Heatmap unavailable — sync data and try again.")
+
             # ── Why this prediction? ──────────────────────────────────────────────
             with st.expander("🔍  Why this prediction?", expanded=False):
                 exp_c1, exp_c2 = st.columns(2)
@@ -1395,17 +1565,182 @@ with picks_tab:
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
 
+        # ── PrizePicks Optimizer ───────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("🏆  PrizePicks Optimizer", expanded=False):
+                st.markdown('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.8rem;">Best 2 & 3-pick Power Play combos</div>', unsafe_allow_html=True)
+                import itertools as _it
+                high_df = display_df[display_df["confidence"].isin(["High","Medium"])].head(15) if "display_df" in dir() else qp_df.head(15)
+                picks_list = [row for _, row in high_df.iterrows()]
+
+                best_2, best_3 = [], []
+                for a, b in _it.combinations(picks_list, 2):
+                    prob = (a["over_prob"]/100) * (b["over_prob"]/100)
+                    best_2.append((prob, a, b))
+                for a, b, c in _it.combinations(picks_list[:10], 3):
+                    prob = (a["over_prob"]/100) * (b["over_prob"]/100) * (c["over_prob"]/100)
+                    best_3.append((prob, a, b, c))
+                best_2.sort(key=lambda x: -x[0])
+                best_3.sort(key=lambda x: -x[0])
+
+                pp_c1, pp_c2 = st.columns(2)
+                with pp_c1:
+                    st.markdown("**2-Pick Power Play**")
+                    for prob, a, b in best_2[:3]:
+                        payout = round((1 / prob) - 1, 1)
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.7rem 0.9rem;margin-bottom:0.5rem;border-left:2px solid #f0672a;">
+                            <div style="font-size:0.72rem;font-weight:700;color:#f0ede8;">{a['player'].split()[-1]} {a['direction']} {a['line']} {a['short']}</div>
+                            <div style="font-size:0.72rem;font-weight:700;color:#f0ede8;">{b['player'].split()[-1]} {b['direction']} {b['line']} {b['short']}</div>
+                            <div style="font-size:0.65rem;color:#4caf82;margin-top:4px;">Hit prob: {prob*100:.1f}% · Payout: {payout:.1f}x</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                with pp_c2:
+                    st.markdown("**3-Pick Power Play**")
+                    for prob, a, b, c in best_3[:3]:
+                        payout = round((1 / prob) - 1, 1)
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.7rem 0.9rem;margin-bottom:0.5rem;border-left:2px solid #4caf82;">
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{a['player'].split()[-1]} {a['direction']} {a['line']} {a['short']}</div>
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{b['player'].split()[-1]} {b['direction']} {b['line']} {b['short']}</div>
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{c['player'].split()[-1]} {c['direction']} {c['line']} {c['short']}</div>
+                            <div style="font-size:0.65rem;color:#4caf82;margin-top:4px;">Hit prob: {prob*100:.1f}% · Payout: {payout:.1f}x</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+        # ── Parlay Optimizer ──────────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("🎯  Parlay Optimizer — Best 3-Pick by EV", expanded=False):
+                import itertools as _it2
+                opt_df = qp_df[qp_df["confidence"] == "High"].head(12)
+                if opt_df.empty:
+                    opt_df = qp_df.head(12)
+                opt_picks = [row for _, row in opt_df.iterrows()]
+                best_ev   = []
+                for combo in _it2.combinations(opt_picks, 3):
+                    prob = 1.0
+                    for p in combo:
+                        prob *= p["over_prob"] / 100
+                    # EV = prob * payout - (1-prob) * 1 where payout ≈ (1/prob - 1) at fair odds
+                    # Use DK 3-pick Power Play payout (6x)
+                    ev = prob * 5 - (1 - prob)  # net EV on 1u
+                    avg_edge = sum(p["edge"] for p in combo) / 3
+                    best_ev.append((ev, avg_edge, combo))
+                best_ev.sort(key=lambda x: -x[0])
+                if best_ev:
+                    top_ev, top_edge, top_combo = best_ev[0]
+                    st.markdown(f'<div style="font-size:0.62rem;color:#2a2a3a;margin-bottom:0.6rem;">Best combo by expected value at 6x payout (PrizePicks Power Play)</div>', unsafe_allow_html=True)
+                    for p in top_combo:
+                        pc2 = TEAM_COLORS.get(p["team"], "#f0672a")
+                        st.markdown(f"""
+                        <div style="display:flex;align-items:center;justify-content:space-between;
+                                    padding:0.5rem 0.8rem;border-bottom:1px solid #0d0d15;">
+                            <span style="font-size:0.78rem;font-weight:700;color:#f0ede8;">{p['player']}</span>
+                            <span style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;color:{pc2};">{p['direction']} {p['line']} {p['short']}</span>
+                            <span style="font-size:0.68rem;color:#4caf82;">{p['over_prob']}% · {p['confidence']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    combo_prob = 1.0
+                    for p in top_combo:
+                        combo_prob *= p["over_prob"] / 100
+                    st.markdown(f"""
+                    <div style="margin-top:0.8rem;display:flex;gap:1.5rem;">
+                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Prob</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#4caf82;">{combo_prob*100:.1f}%</div></div>
+                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">EV per 1u</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{'#4caf82' if top_ev>=0 else '#e05a5a'};">{top_ev:+.2f}u</div></div>
+                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg Edge</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#f0672a;">{top_edge:.1f}x</div></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ── Quick Picks Pivot Table ───────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("📊  Stat Pivot Table", expanded=False):
+                try:
+                    pivot_data = {}
+                    for _, row in qp_df.iterrows():
+                        player = row["player"]
+                        stat   = row["short"]
+                        val    = f"{'⬆' if row['direction']=='OVER' else '⬇'}{row['predicted']}"
+                        pivot_data.setdefault(player, {})[stat] = val
+                    if pivot_data:
+                        pivot_df = pd.DataFrame(pivot_data).T.fillna("—")
+                        st.dataframe(pivot_df, use_container_width=True)
+                except Exception:
+                    st.caption("Pivot view unavailable.")
+
+        # ── Discord Webhook ───────────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("📣  Share to Discord", expanded=False):
+                discord_url = st.text_input(
+                    "Discord Webhook URL",
+                    placeholder="https://discord.com/api/webhooks/...",
+                    key="discord_webhook",
+                    type="password",
+                )
+                if discord_url and st.button("📣 Post Top 5 Picks to Discord", key="discord_send"):
+                    try:
+                        import requests as _req
+                        top5 = qp_df.head(5)
+                        lines = ["**🏀 LineBreaker — Today's Top Picks**", ""]
+                        for rank, (_, row) in enumerate(top5.iterrows(), 1):
+                            arrow = "⬆" if row["direction"] == "OVER" else "⬇"
+                            lines.append(f"**#{rank}** {row['player']} {arrow} {row['line']} {row['short']} ({row['direction']} {row['over_prob']}% · {row['confidence']})")
+                        lines += ["", "Beat the Line. Break the Line. 🔥"]
+                        payload = {"content": "\n".join(lines), "username": "LineBreaker"}
+                        resp = _req.post(discord_url, json=payload, timeout=8)
+                        if resp.status_code in (200, 204):
+                            st.success("✅ Posted to Discord!")
+                        else:
+                            st.error(f"Discord error: {resp.status_code}")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ACCURACY TAB
 # ══════════════════════════════════════════════════════════════════════════════
 with accuracy_tab:
-    # Resolve any pending predictions
-    try:
-        resolved = resolve_predictions()
-        if resolved > 0:
-            st.success(f"✅ Resolved {resolved} predictions with actual results!")
-    except Exception:
-        pass
+    # ── Auto-resolve row ───────────────────────────────────────────────────────
+    ar_col1, ar_col2, ar_col3 = st.columns([2, 2, 2])
+    with ar_col1:
+        if st.button("🤖 Auto-Resolve from ESPN", use_container_width=True,
+                     help="Pull actual box scores and resolve pending picks automatically"):
+            with st.spinner("Fetching box scores..."):
+                try:
+                    n = auto_resolve_from_espn()
+                    if n > 0:
+                        st.success(f"✅ Resolved {n} pick{'s' if n>1 else ''} from ESPN box scores!")
+                    else:
+                        st.info("No pending picks matched recent completed games.")
+                except Exception as e:
+                    st.error(f"Auto-resolve failed: {e}")
+    with ar_col2:
+        # Resolve from nba_api (existing)
+        try:
+            resolved = resolve_predictions()
+            if resolved > 0:
+                st.success(f"✅ Resolved {resolved} predictions with actual results!")
+        except Exception:
+            pass
+    with ar_col3:
+        # Historical CSV export
+        try:
+            all_preds_export = get_all_preds_full()
+            if all_preds_export:
+                import io as _io2
+                exp_df = pd.DataFrame(all_preds_export)
+                csv2   = _io2.StringIO()
+                exp_df.to_csv(csv2, index=False)
+                st.download_button(
+                    label="📥 Export All Picks CSV",
+                    data=csv2.getvalue(),
+                    file_name="linebreaker_history.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
 
     stats = get_accuracy_stats()
 
@@ -1491,6 +1826,67 @@ with accuracy_tab:
                     <div style="font-size:0.62rem;color:#2a2a3a;">{tdata["total"]} picks</div>
                 </div>
                 """, unsafe_allow_html=True)
+
+        # ── Accuracy Trend Chart ───────────────────────────────────────────────
+        trend_data = get_accuracy_trend(days=60)
+        if len(trend_data) >= 2:
+            st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Accuracy Trend (60 days)</div>', unsafe_allow_html=True)
+            TW, TH, TPL, TPR, TPT, TPB = 700, 120, 10, 10, 10, 25
+            t_dates = [d["date"] for d in trend_data]
+            t_vals  = [d["rolling"] for d in trend_data]
+            t_n     = len(t_vals)
+            def _tx(i): return TPL + i * (TW - TPL - TPR) / max(t_n - 1, 1)
+            def _ty(v): return TPT + (1 - v / 100) * (TH - TPT - TPB)
+            t_pts   = " ".join(f"{_tx(i):.1f},{_ty(v):.1f}" for i, v in enumerate(t_vals))
+            t_fx, t_lx = _tx(0), _tx(t_n - 1)
+            t_ap    = f"M {t_fx:.1f},{TH-TPB} " + " ".join(f"L {_tx(i):.1f},{_ty(v):.1f}" for i, v in enumerate(t_vals)) + f" L {t_lx:.1f},{TH-TPB} Z"
+            # 50% baseline
+            t_base  = _ty(50)
+            trend_svg = (
+                f'<svg width="100%" viewBox="0 0 {TW} {TH}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;">'
+                f'<defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f0672a" stop-opacity="0.3"/><stop offset="100%" stop-color="#f0672a" stop-opacity="0"/></linearGradient></defs>'
+                f'<line x1="{TPL}" y1="{t_base:.1f}" x2="{TW-TPR}" y2="{t_base:.1f}" stroke="#252535" stroke-dasharray="3,4" stroke-width="1"/>'
+                f'<text x="{TW-TPR+2}" y="{t_base+4:.1f}" font-size="8" fill="#252535" font-family="Inter,sans-serif">50%</text>'
+                f'<path d="{t_ap}" fill="url(#tg)"/>'
+                f'<polyline points="{t_pts}" fill="none" stroke="#f0672a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+            )
+            # Dots + labels for last 5
+            for i, (v, d) in enumerate(zip(t_vals, t_dates)):
+                if i >= t_n - 5 or i == 0:
+                    cx2, cy2 = _tx(i), _ty(v)
+                    tc2 = "#4caf82" if v >= 55 else "#d4b44a" if v >= 50 else "#e05a5a"
+                    trend_svg += f'<circle cx="{cx2:.1f}" cy="{cy2:.1f}" r="3" fill="{tc2}" stroke="#080810" stroke-width="1"/>'
+                    if i == t_n - 1 or i == 0:
+                        anchor = "end" if i == t_n - 1 else "start"
+                        trend_svg += f'<text x="{cx2:.1f}" y="{cy2-6:.1f}" text-anchor="{anchor}" font-size="9" fill="{tc2}" font-family="Inter,sans-serif">{v:.0f}%</text>'
+            trend_svg += "</svg>"
+            components.html(
+                f'<!DOCTYPE html><html><head><style>*{{margin:0;box-sizing:border-box;}}body{{background:transparent;}}'
+                f'.w{{background:#0a0a12;border:1px solid #13131f;border-radius:10px;padding:12px 16px;}}</style></head>'
+                f'<body><div class="w">{trend_svg}</div></body></html>',
+                height=150, scrolling=False,
+            )
+
+        # ── Confidence Calibration ─────────────────────────────────────────────
+        by_conf = stats.get("by_confidence", {})
+        if any(v["total"] > 0 for v in by_conf.values()):
+            st.markdown('<div style="margin-top:1.2rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Confidence Calibration</div>', unsafe_allow_html=True)
+            cal_cols = st.columns(3)
+            for i, (conf, cdata) in enumerate([("High", by_conf.get("High",{})), ("Medium", by_conf.get("Medium",{})), ("Low", by_conf.get("Low",{}))]):
+                conf_c = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}[conf]
+                with cal_cols[i]:
+                    cacc = cdata.get("accuracy", 0.0) if cdata.get("total",0) > 0 else 0.0
+                    ctot = cdata.get("total", 0)
+                    st.markdown(f"""
+                    <div style="background:#0a0a12;border:1px solid #13131f;border-radius:10px;padding:0.8rem;text-align:center;">
+                        <div style="font-size:0.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{conf_c};margin-bottom:6px;">{conf}</div>
+                        <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:{conf_c};line-height:1;">{cacc:.0f}%</div>
+                        <div style="height:4px;background:#1a1a28;border-radius:2px;overflow:hidden;margin:6px 0;">
+                            <div style="height:100%;width:{cacc}%;background:{conf_c};border-radius:2px;"></div>
+                        </div>
+                        <div style="font-size:0.62rem;color:#2a2a3a;">{ctot} picks</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
         # Recent picks log
         st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Recent Picks</div>', unsafe_allow_html=True)
