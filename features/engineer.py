@@ -205,6 +205,17 @@ def get_feature_cols(df: pd.DataFrame) -> list:
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
+# Module-level in-memory cache — survives across predict() calls in same process
+_FM_CACHE = None
+
+def _get_cached_fm(force_refresh: bool = False):
+    """Return cached feature matrix. Loads from disk once, then serves from memory."""
+    global _FM_CACHE
+    if not force_refresh and _FM_CACHE is not None and len(_FM_CACHE) > 0:
+        return _FM_CACHE
+    _FM_CACHE = build_feature_matrix(force_refresh=force_refresh)
+    return _FM_CACHE
+
 def build_feature_matrix(force_refresh: bool = False) -> pd.DataFrame:
     cache_path = ROOT / "data" / "cache" / "feature_matrix.csv"
 
@@ -245,10 +256,13 @@ def build_player_features(
     opponent_team_id: int,
     is_home: bool,
     rest_days: int,
-    season: str = "2024-25",
+    season: str = None,
     n_recent: int = 10,
 ) -> pd.DataFrame:
-    fm = build_feature_matrix()
+    from data.fetch_data import CURRENT_SEASON as _CUR
+    if season is None:
+        season = _CUR
+    fm = _get_cached_fm()
     player_games = fm[fm["player_id"] == player_id].sort_values("game_date")
 
     if player_games.empty:
