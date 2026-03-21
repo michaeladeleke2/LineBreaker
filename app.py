@@ -614,7 +614,7 @@ with nba_tab:
             lu_info = result.lineup_info or {}
             lu_badge = _lineup_badge(lu_info)
 
-            # Over/under
+            # Over/under — blend custom line into the already-adjusted over_prob
             mae  = tr.model_mae if tr.model_mae>0 else 1.0
             diff = (tr.predicted_value - custom_line)/mae
             bw   = 0.25 if abs(tr.threshold-custom_line)<2 else 0.5
@@ -622,7 +622,18 @@ with nba_tab:
             op   = round((bw*ro+(1-bw)*tr.over_prob)*100,1)
             up   = round(100-op,1)
 
-            # Confidence
+            # Edge + bet sizing
+            edge_abs = round(tr.predicted_value - custom_line, 1)
+            edge_pct = round(abs(edge_abs) / max(custom_line, 1) * 100, 1)
+            bet_sz   = tr.bet_size
+            bet_c    = {"3u":"#4caf82","2u":"#d4b44a","1u":"#252535"}.get(bet_sz,"#252535")
+            value_lock = (tr.confidence_label == "High" and abs(edge_abs)/mae >= 1.5)
+
+            # Form / hit-rate badge
+            hit_lbl = tr.hit_rate_l5  # e.g. "4/5 HIT"
+            consistency = tr.consistency_score  # 0–1
+
+            # Confidence colors
             cc = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}
             cb = {"High":"rgba(76,175,130,0.12)","Medium":"rgba(212,180,74,0.12)","Low":"rgba(224,90,90,0.12)"}
             cbo= {"High":"rgba(76,175,130,0.3)","Medium":"rgba(212,180,74,0.3)","Low":"rgba(224,90,90,0.3)"}
@@ -693,55 +704,78 @@ with nba_tab:
                     rl+=f'<line x1="{PL}" y1="{ly4:.1f}" x2="{W-PR}" y2="{ly4:.1f}" stroke="{pc}" stroke-dasharray="4,3" stroke-width="1.5" opacity="0.6"/>'
                     rl+=f'<text x="{W-PR+4}" y="{ly4+4:.1f}" font-size="9" fill="{pc}" font-family="Inter,sans-serif" opacity="0.9">{custom_line}</text>'
                 chart_svg=f'<svg width="100%" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;"><defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="{pc}" stop-opacity="0.2"/><stop offset="100%" stop-color="{pc}" stop-opacity="0"/></linearGradient></defs>{rl}<path d="{ap}" fill="url(#ag)"/><polyline points="{pts}" fill="none" stroke="{pc}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>{dots}</svg>'
-                chart_block=f'<div><div style="font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1e1e28;margin-bottom:10px;">Last {n} games &mdash; {target_info["label"]}</div>{chart_svg}</div>'
+                chart_lbl   = f"Last {n} games \u2014 {target_info['label']}"
+                chart_block = (f'<div><div style="font-size:9px;font-weight:700;letter-spacing:2px;'
+                               f'text-transform:uppercase;color:#1e1e28;margin-bottom:10px;">'
+                               f'{chart_lbl}</div>{chart_svg}</div>')
 
+
+            # Value lock + form badge for header
+            vl_badge   = ('&nbsp;<span style="background:rgba(76,175,130,0.15);color:#4caf82;border:1px solid rgba(76,175,130,0.4);'
+                          'border-radius:4px;padding:2px 7px;font-size:9px;font-weight:800;letter-spacing:1.5px;">🔒 VALUE LOCK</span>'
+                          if value_lock else "")
+            hit_badge  = (f'&nbsp;<span style="background:rgba(240,103,42,0.1);color:#888;border:1px solid rgba(240,103,42,0.2);'
+                          f'border-radius:4px;padding:2px 7px;font-size:9px;font-weight:700;letter-spacing:1px;">{hit_lbl}</span>'
+                          if hit_lbl else "")
 
             html = f"""<!DOCTYPE html><html><head>
             <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
             <style>
             *{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;color:#e8e6e0;}}
-            .card{{background:#0a0a12;border-radius:16px;overflow:hidden;}}
-            .top{{height:3px;background:linear-gradient(90deg,{pc} 0%,transparent 100%);}}
+            .card{{background:#0a0a12;border-radius:16px;overflow:hidden;border:1px solid #111118;}}
+            .top{{height:3px;background:linear-gradient(90deg,{pc} 0%,{pc}88 40%,transparent 100%);}}
             .hdr{{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 14px;border-bottom:1px solid #0d0d15;gap:12px;}}
             .hl{{display:flex;align-items:center;gap:12px;flex:1;min-width:0;}}
             .av{{width:52px;height:52px;border-radius:50%;border:2px solid {pc};object-fit:cover;object-position:top;background:#0d0d15;flex-shrink:0;}}
             .nm{{font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#f0ede8;line-height:1.1;}}
             .sb{{font-size:11px;color:#252535;margin-top:3px;}} .opp{{color:{oc};font-weight:600;}}
+            .badges{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;}}
             .cf{{display:inline-flex;align-items:center;gap:4px;border-radius:20px;padding:3px 10px;
                   font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0;
                   background:{cb.get(tr.confidence_label,"rgba(240,103,42,0.12)")};
                   color:{cco};border:1px solid {cbo.get(tr.confidence_label,"rgba(240,103,42,0.3)")};}}
-            .cd{{width:5px;height:5px;border-radius:50%;background:{cco};}}
+            .cd{{width:5px;height:5px;border-radius:50%;background:{cco};animation:pulse 2s infinite;}}
+            @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:0.4}}}}
             .body{{padding:18px 20px 16px;}}
-            /* Hero number row */
             .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid #0d0d15;}}
             .proj{{flex:0 0 auto;}}
             .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{pc};
-                    text-shadow:0 0 60px {pc}44;letter-spacing:0.01em;}}
+                    text-shadow:0 0 40px {pc}55,0 0 80px {pc}22;letter-spacing:0.01em;}}
             .plbl{{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#1e1e28;margin-top:6px;}}
-            /* Stats grid */
             .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
             .sc{{background:#0d0d15;border-radius:10px;padding:10px 12px;}}
             .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
             .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
-            /* Confidence meter */
             .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
             .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
             .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{cco};}}
+            /* Edge + bet row */
+            .edge-row{{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}}
+            .edge-chip{{background:#0d0d15;border-radius:8px;padding:7px 12px;}}
+            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .ec-val{{font-family:'Bebas Neue',sans-serif;font-size:1.2rem;line-height:1;}}
+            .bet-chip{{background:rgba({int(bet_c[1:3],16) if len(bet_c)>3 else 37},{int(bet_c[3:5],16) if len(bet_c)>5 else 37},{int(bet_c[5:7],16) if len(bet_c)>7 else 48},0.12);
+                        border:1px solid {bet_c}44;border-radius:8px;padding:7px 14px;}}
+            .bc-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{bet_c};}}
+            .bc-val{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{bet_c};line-height:1;}}
+            /* Consistency bar */
+            .cons-bar{{flex:1;min-width:120px;}}
+            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;margin-bottom:4px;}}
+            .cons-track{{height:4px;background:#0d0d15;border-radius:2px;overflow:hidden;}}
+            .cons-fill{{height:100%;background:linear-gradient(90deg,#e05a5a,#d4b44a,#4caf82);border-radius:2px;width:{int(consistency*100)}%;}}
             /* Over/under */
             .ou{{margin-bottom:16px;}}
             .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
             .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
             .or:last-child{{margin-bottom:0;}}
             .ol{{font-size:11px;font-weight:500;color:#2a2a3a;min-width:72px;}}
-            .ob{{flex:1;height:5px;background:#0d0d15;border-radius:3px;overflow:hidden;position:relative;}}
-            .fo{{height:100%;background:{pc};border-radius:3px;width:{op:.1f}%;}}
-            .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{up:.1f}%;}}
+            .ob{{flex:1;height:5px;background:#0d0d15;border-radius:3px;overflow:hidden;}}
+            .fo{{height:100%;background:{pc};border-radius:3px;width:{op:.1f}%;transition:width 1s ease-out;}}
+            .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{up:.1f}%;transition:width 1s ease-out;}}
             .op2{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;min-width:48px;text-align:right;line-height:1;}}
-            /* Chart */
             .chart-wrap{{padding-top:14px;border-top:1px solid #0d0d15;}}
-            .ct{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
-            .meta{{font-size:9px;color:#111118;margin-top:8px;padding-top:10px;border-top:1px solid #0a0a12;}}
+            .meta{{font-size:9px;color:#0d0d18;margin-top:8px;padding-top:8px;border-top:1px solid #0a0a12;
+                    display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
             </style></head><body>
             <div class="card">
                 <div class="top"></div>
@@ -751,6 +785,7 @@ with nba_tab:
                         <div>
                             <div class="nm">{result.player_name}</div>
                             <div class="sb">{loc}&nbsp;<span class="opp">{sel_opp}</span>&nbsp;&middot;&nbsp;{rest_days}d rest&nbsp;&middot;&nbsp;{location}{inj}{lu_badge}</div>
+                            <div class="badges">{vl_badge}{hit_badge}</div>
                         </div>
                     </div>
                     <span class="cf"><span class="cd"></span>{tr.confidence_label}</span>
@@ -758,7 +793,7 @@ with nba_tab:
                 <div class="body">
                     <div class="hero-row">
                         <div class="proj">
-                            <div class="pnum">{tr.predicted_value}</div>
+                            <div class="pnum" id="pred-num">0</div>
                             <div class="plbl">Projected {target_info["label"]}</div>
                         </div>
                         <div class="meter-col">
@@ -775,12 +810,29 @@ with nba_tab:
                                 <circle cx="100" cy="100" r="5" fill="#e8e6e0"/>
                             </svg>
                             <div class="meter-val">{op:.0f}%</div>
-                            <div class="meter-lbl">{tr.confidence_label}</div>
+                            <div class="meter-lbl">Over prob.</div>
                         </div>
                         <div class="sgrid">
                             <div class="sc"><div class="sv">{tr.recent_avg_5}</div><div class="sl">L5 Avg</div></div>
                             <div class="sc"><div class="sv">{tr.recent_avg_10}</div><div class="sl">L10 Avg</div></div>
                             <div class="sc"><div class="sv">{custom_line}</div><div class="sl">Line</div></div>
+                        </div>
+                    </div>
+                    <!-- Edge + bet size + consistency row -->
+                    <div class="edge-row">
+                        <div class="edge-chip">
+                            <div class="ec-lbl">Edge</div>
+                            <div class="ec-val" style="color:{'#4caf82' if edge_abs>=0 else '#e05a5a'}">
+                                {'▲' if edge_abs>=0 else '▼'}&nbsp;{abs(edge_abs)}&nbsp;<span style="font-size:0.75rem;color:#252535;">({edge_pct}%)</span>
+                            </div>
+                        </div>
+                        <div class="bet-chip">
+                            <div class="bc-lbl">Bet Size</div>
+                            <div class="bc-val">{bet_sz}</div>
+                        </div>
+                        <div class="cons-bar">
+                            <div class="cons-lbl">Consistency &nbsp; {int(consistency*100)}%</div>
+                            <div class="cons-track"><div class="cons-fill"></div></div>
                         </div>
                     </div>
                     <div class="ou">
@@ -796,10 +848,31 @@ with nba_tab:
                             <div class="op2" style="color:#4a9eff;">{up:.1f}%</div>
                         </div>
                     </div>
-                    {"" if not chart_block else f'<div class="chart-wrap"><div class="ct">Last {n if cv else ""} games &mdash; {target_info["label"]}</div>{chart_svg if cv else ""}</div>'}
-                    <div class="meta">Model AUC {tr.model_auc}&nbsp;&middot;&nbsp;Trained on 5 seasons</div>
+                    {chart_block}
+                    <div class="meta">
+                        <span>AUC {tr.model_auc}</span>
+                        <span style="color:#0a0a16">&middot;</span>
+                        <span>MAE {tr.model_mae:.2f}</span>
+                        <span style="color:#0a0a16">&middot;</span>
+                        <span>Blend: model + recency</span>
+                    </div>
                 </div>
-            </div></body></html>"""
+            </div>
+            <script>
+            (function(){{
+                var el=document.getElementById('pred-num');
+                var target={tr.predicted_value};
+                var dur=900,start=performance.now();
+                function step(now){{
+                    var p=Math.min((now-start)/dur,1);
+                    var ease=1-Math.pow(1-p,3);
+                    el.textContent=(target*ease).toFixed(1);
+                    if(p<1)requestAnimationFrame(step);
+                }}
+                requestAnimationFrame(step);
+            }})();
+            </script>
+            </body></html>"""
 
             components.html(html, height=630, scrolling=False)
 
@@ -829,22 +902,88 @@ with nba_tab:
                 )
                 st.code(share_text, language=None)
 
+            # ── Add to Parlay ─────────────────────────────────────────────────────
+            if st.button(f"➕ Add to Parlay: {result.player_name} {target_info['short']} {'OVER' if op>50 else 'UNDER'} {custom_line}",
+                         use_container_width=True, key="add_parlay"):
+                parlay = st.session_state.get("parlay_legs", [])
+                leg = {
+                    "player": result.player_name,
+                    "stat":   target_info["short"],
+                    "line":   custom_line,
+                    "dir":    "OVER" if op > 50 else "UNDER",
+                    "prob":   op / 100,
+                    "conf":   tr.confidence_label,
+                }
+                if not any(l["player"] == leg["player"] and l["stat"] == leg["stat"] for l in parlay):
+                    parlay.append(leg)
+                    st.session_state["parlay_legs"] = parlay
+                    st.success(f"✅ Added {result.player_name} {target_info['short']} to parlay! ({len(parlay)} legs)")
+                else:
+                    st.info("Already in parlay.")
+
             with st.expander("📊  All props — this matchup", expanded=False):
-                    rows=[]
-                    for t,ta in result.targets.items():
-                        inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
-                        rows.append({"Stat":inf["label"],"Group":inf["group"],"Projected":ta.predicted_value,
-                                     "Line":ta.threshold,"Over %":f"{ta.over_prob*100:.1f}%",
-                                     "Confidence":ta.confidence_label,"MAE":ta.model_mae})
-                    if rows:
-                        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
-                            column_config={"Projected":st.column_config.NumberColumn("Projected",format="%.1f"),
-                                           "MAE":st.column_config.NumberColumn("MAE",format="%.3f")})
+                rows=[]
+                for t,ta in result.targets.items():
+                    inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
+                    hit_pct = round(ta.over_prob*100,1) if ta.over_prob > 0.5 else round((1-ta.over_prob)*100,1)
+                    rows.append({"Stat":inf["label"],"Group":inf["group"],"Projected":ta.predicted_value,
+                                 "Line":ta.threshold,
+                                 "Dir": "OVER" if ta.over_prob>0.5 else "UNDER",
+                                 "Prob %":f"{hit_pct:.1f}%",
+                                 "Confidence":ta.confidence_label,
+                                 "Bet":ta.bet_size,
+                                 "Hit Rate":ta.hit_rate_l5,
+                                 "MAE":ta.model_mae})
+                if rows:
+                    st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
+                        column_config={"Projected":st.column_config.NumberColumn("Projected",format="%.1f"),
+                                       "MAE":st.column_config.NumberColumn("MAE",format="%.3f")})
 
 # ══════════════════════════════════════════════════════════════════════════════
 # QUICK PICKS TAB
 # ══════════════════════════════════════════════════════════════════════════════
 with picks_tab:
+    # ── Parlay Builder ─────────────────────────────────────────────────────────
+    parlay_legs = st.session_state.get("parlay_legs", [])
+    if parlay_legs:
+        with st.expander(f"🎰 Parlay Builder — {len(parlay_legs)} leg{'s' if len(parlay_legs)>1 else ''}", expanded=True):
+            import math as _math
+            combined_prob = 1.0
+            for leg in parlay_legs:
+                combined_prob *= leg["prob"]
+            implied_odds = round(1 / combined_prob, 2) if combined_prob > 0 else 0
+            payout_100   = round((implied_odds - 1) * 100)
+            conf_counts  = {"High":0,"Medium":0,"Low":0}
+            for leg in parlay_legs:
+                conf_counts[leg["conf"]] = conf_counts.get(leg["conf"], 0) + 1
+
+            # Header stats
+            pc_col1, pc_col2, pc_col3, pc_col4 = st.columns(4)
+            pc_col1.metric("Legs", len(parlay_legs))
+            pc_col2.metric("Hit Probability", f"{combined_prob*100:.1f}%")
+            pc_col3.metric("Implied Odds", f"{implied_odds:.2f}x")
+            pc_col4.metric("Payout per $100", f"${payout_100}")
+
+            for i, leg in enumerate(parlay_legs):
+                lc = TEAM_COLORS.get(leg.get("team",""), "#f0672a")
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;'
+                    f'padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.75rem;">'
+                    f'<span style="color:#f0ede8;font-weight:600;">{leg["player"]}</span>'
+                    f'<span style="color:#2a2a3a;">{leg["dir"]} {leg["line"]} {leg["stat"]}</span>'
+                    f'<span style="color:#4caf82;font-weight:700;">{leg["prob"]*100:.1f}%</span>'
+                    f'<span style="background:#1a1a28;color:#252535;border-radius:4px;padding:1px 6px;font-size:9px;">{leg["conf"]}</span>'
+                    f'</div>', unsafe_allow_html=True)
+
+            cl1, cl2 = st.columns(2)
+            with cl1:
+                if st.button("🗑 Clear Parlay", key="clear_parlay"):
+                    st.session_state["parlay_legs"] = []
+                    st.rerun()
+            with cl2:
+                parlay_share = "\n".join([f"{l['player']} {l['dir']} {l['line']} {l['stat']} ({l['prob']*100:.1f}%)" for l in parlay_legs])
+                st.code(f"🎰 LineBreaker Parlay ({len(parlay_legs)} legs)\n{parlay_share}\nCombined: {combined_prob*100:.1f}% | {implied_odds:.2f}x", language=None)
+
     st.markdown("""
     <div style="margin-bottom:1.2rem;">
         <div style="font-size:1.4rem;font-weight:700;color:#f0ede8;margin-bottom:0.3rem;">⚡ Today's Best Picks</div>
@@ -1019,6 +1158,17 @@ with picks_tab:
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                    # Add to Parlay button (inline, small)
+                    if st.button(f"➕ Parlay", key=f"qp_parlay_{rank}_{row['player'][:6]}",
+                                 help=f"Add {row['player']} {row['short']} to parlay"):
+                        parlay_legs = st.session_state.get("parlay_legs", [])
+                        leg = {"player": row["player"], "stat": row["short"],
+                               "line": row["line"], "dir": row["direction"],
+                               "prob": row["over_prob"]/100, "conf": row["confidence"]}
+                        if not any(l["player"]==leg["player"] and l["stat"]==leg["stat"] for l in parlay_legs):
+                            parlay_legs.append(leg)
+                            st.session_state["parlay_legs"] = parlay_legs
+                            st.rerun()
             except Exception as e:
                 import traceback
                 st.error(f"Display error: {e}")
