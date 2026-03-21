@@ -26,6 +26,21 @@ except ImportError:
     def resolve_predictions(*a, **k): return 0
     def get_accuracy_stats(*a, **k): return {'total':0,'correct':0,'accuracy':0.0,'streak':0,'by_target':{},'recent_30d':{'total':0,'correct':0,'accuracy':0.0}}
     def get_recent_predictions(*a, **k): return []
+try:
+    from data.fetch_lines import fetch_player_props, get_line_for_target, fetch_today_odds
+    LINES_ENABLED = True
+except ImportError:
+    LINES_ENABLED = False
+    def fetch_player_props(*a, **k): return {}
+    def get_line_for_target(*a, **k): return (None, False)
+    def fetch_today_odds(): return {}
+
+try:
+    from models.predict import get_matchup_history
+    MATCHUP_ENABLED = True
+except ImportError:
+    MATCHUP_ENABLED = False
+
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
 try:
@@ -146,6 +161,17 @@ div[data-baseweb="select"] > div {
 
 /* Sidebar off */
 [data-testid="stSidebar"] { display:none !important; }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .lb-nav { padding:0 1rem; height:44px; }
+    .lb-logo { font-size:1.4rem; }
+    .lb-ticker-wrap { display:none; }
+    .lb-body { padding:0.8rem 0.8rem 3rem; }
+    .block-container { padding:0 !important; }
+    [data-testid="stTabs"] > div:first-child { padding:0 0.5rem; }
+    button[data-baseweb="tab"] { font-size:0.6rem !important; padding:0.6rem 0.6rem !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -209,6 +235,20 @@ def _svg_field():
   <line x1="216" y1="0" x2="216" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
   <line x1="288" y1="0" x2="288" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
 </svg>"""
+
+def _dfs_points(pred_dict: dict) -> float:
+    """DraftKings DFS scoring: PTS×1 + REB×1.25 + AST×1.5 + STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5"""
+    try:
+        pts  = float(pred_dict.get("pts",  0) or 0)
+        reb  = float(pred_dict.get("reb",  0) or 0)
+        ast  = float(pred_dict.get("ast",  0) or 0)
+        stl  = float(pred_dict.get("stl",  0) or 0)
+        blk  = float(pred_dict.get("blk",  0) or 0)
+        tov  = float(pred_dict.get("tov",  0) or 0)
+        fg3m = float(pred_dict.get("fg3m", 0) or 0)
+        return round(pts*1 + reb*1.25 + ast*1.5 + stl*2 + blk*2 + tov*(-0.5) + fg3m*0.5, 2)
+    except:
+        return 0.0
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
@@ -478,6 +518,18 @@ with nba_tab:
 
         st.markdown('<span class="ctrl-label">Over/Under Line</span>', unsafe_allow_html=True)
         default_line = DEFAULT_THRESHOLDS.get(sel_target, 10)
+        # Live sportsbook line lookup
+        if LINES_ENABLED:
+            try:
+                live_line, is_live = get_line_for_target(sel_player, sel_target)
+                if live_line is not None:
+                    default_line = live_line
+                    st.markdown(
+                        f'<div style="font-size:0.58rem;color:#4caf82;font-weight:700;letter-spacing:0.1em;margin-bottom:0.3rem;">'
+                        f'📡 Live: {live_line} {"(confirmed)" if is_live else "(estimated)"}</div>',
+                        unsafe_allow_html=True)
+            except:
+                pass
         custom_line  = st.slider("line", 1, 60, value=int(default_line), label_visibility="collapsed")
 
         run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
@@ -614,7 +666,7 @@ with nba_tab:
             lu_info = result.lineup_info or {}
             lu_badge = _lineup_badge(lu_info)
 
-            # Over/under
+            # Over/under — blend custom line into the already-adjusted over_prob
             mae  = tr.model_mae if tr.model_mae>0 else 1.0
             diff = (tr.predicted_value - custom_line)/mae
             bw   = 0.25 if abs(tr.threshold-custom_line)<2 else 0.5
@@ -622,7 +674,18 @@ with nba_tab:
             op   = round((bw*ro+(1-bw)*tr.over_prob)*100,1)
             up   = round(100-op,1)
 
-            # Confidence
+            # Edge + bet sizing
+            edge_abs = round(tr.predicted_value - custom_line, 1)
+            edge_pct = round(abs(edge_abs) / max(custom_line, 1) * 100, 1)
+            bet_sz   = tr.bet_size
+            bet_c    = {"3u":"#4caf82","2u":"#d4b44a","1u":"#252535"}.get(bet_sz,"#252535")
+            value_lock = (tr.confidence_label == "High" and abs(edge_abs)/mae >= 1.5)
+
+            # Form / hit-rate badge
+            hit_lbl = tr.hit_rate_l5  # e.g. "4/5 HIT"
+            consistency = tr.consistency_score  # 0–1
+
+            # Confidence colors
             cc = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}
             cb = {"High":"rgba(76,175,130,0.12)","Medium":"rgba(212,180,74,0.12)","Low":"rgba(224,90,90,0.12)"}
             cbo= {"High":"rgba(76,175,130,0.3)","Medium":"rgba(212,180,74,0.3)","Low":"rgba(224,90,90,0.3)"}
@@ -693,55 +756,78 @@ with nba_tab:
                     rl+=f'<line x1="{PL}" y1="{ly4:.1f}" x2="{W-PR}" y2="{ly4:.1f}" stroke="{pc}" stroke-dasharray="4,3" stroke-width="1.5" opacity="0.6"/>'
                     rl+=f'<text x="{W-PR+4}" y="{ly4+4:.1f}" font-size="9" fill="{pc}" font-family="Inter,sans-serif" opacity="0.9">{custom_line}</text>'
                 chart_svg=f'<svg width="100%" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;"><defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="{pc}" stop-opacity="0.2"/><stop offset="100%" stop-color="{pc}" stop-opacity="0"/></linearGradient></defs>{rl}<path d="{ap}" fill="url(#ag)"/><polyline points="{pts}" fill="none" stroke="{pc}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>{dots}</svg>'
-                chart_block=f'<div><div style="font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1e1e28;margin-bottom:10px;">Last {n} games &mdash; {target_info["label"]}</div>{chart_svg}</div>'
+                chart_lbl   = f"Last {n} games \u2014 {target_info['label']}"
+                chart_block = (f'<div><div style="font-size:9px;font-weight:700;letter-spacing:2px;'
+                               f'text-transform:uppercase;color:#1e1e28;margin-bottom:10px;">'
+                               f'{chart_lbl}</div>{chart_svg}</div>')
 
+
+            # Value lock + form badge for header
+            vl_badge   = ('&nbsp;<span style="background:rgba(76,175,130,0.15);color:#4caf82;border:1px solid rgba(76,175,130,0.4);'
+                          'border-radius:4px;padding:2px 7px;font-size:9px;font-weight:800;letter-spacing:1.5px;">🔒 VALUE LOCK</span>'
+                          if value_lock else "")
+            hit_badge  = (f'&nbsp;<span style="background:rgba(240,103,42,0.1);color:#888;border:1px solid rgba(240,103,42,0.2);'
+                          f'border-radius:4px;padding:2px 7px;font-size:9px;font-weight:700;letter-spacing:1px;">{hit_lbl}</span>'
+                          if hit_lbl else "")
 
             html = f"""<!DOCTYPE html><html><head>
             <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
             <style>
             *{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;color:#e8e6e0;}}
-            .card{{background:#0a0a12;border-radius:16px;overflow:hidden;}}
-            .top{{height:3px;background:linear-gradient(90deg,{pc} 0%,transparent 100%);}}
+            .card{{background:#0a0a12;border-radius:16px;overflow:hidden;border:1px solid #111118;}}
+            .top{{height:3px;background:linear-gradient(90deg,{pc} 0%,{pc}88 40%,transparent 100%);}}
             .hdr{{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 14px;border-bottom:1px solid #0d0d15;gap:12px;}}
             .hl{{display:flex;align-items:center;gap:12px;flex:1;min-width:0;}}
             .av{{width:52px;height:52px;border-radius:50%;border:2px solid {pc};object-fit:cover;object-position:top;background:#0d0d15;flex-shrink:0;}}
             .nm{{font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#f0ede8;line-height:1.1;}}
             .sb{{font-size:11px;color:#252535;margin-top:3px;}} .opp{{color:{oc};font-weight:600;}}
+            .badges{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:4px;}}
             .cf{{display:inline-flex;align-items:center;gap:4px;border-radius:20px;padding:3px 10px;
                   font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0;
                   background:{cb.get(tr.confidence_label,"rgba(240,103,42,0.12)")};
                   color:{cco};border:1px solid {cbo.get(tr.confidence_label,"rgba(240,103,42,0.3)")};}}
-            .cd{{width:5px;height:5px;border-radius:50%;background:{cco};}}
+            .cd{{width:5px;height:5px;border-radius:50%;background:{cco};animation:pulse 2s infinite;}}
+            @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:0.4}}}}
             .body{{padding:18px 20px 16px;}}
-            /* Hero number row */
             .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid #0d0d15;}}
             .proj{{flex:0 0 auto;}}
             .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{pc};
-                    text-shadow:0 0 60px {pc}44;letter-spacing:0.01em;}}
+                    text-shadow:0 0 40px {pc}55,0 0 80px {pc}22;letter-spacing:0.01em;}}
             .plbl{{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#1e1e28;margin-top:6px;}}
-            /* Stats grid */
             .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
             .sc{{background:#0d0d15;border-radius:10px;padding:10px 12px;}}
             .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
             .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
-            /* Confidence meter */
             .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
             .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
             .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{cco};}}
+            /* Edge + bet row */
+            .edge-row{{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}}
+            .edge-chip{{background:#0d0d15;border-radius:8px;padding:7px 12px;}}
+            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .ec-val{{font-family:'Bebas Neue',sans-serif;font-size:1.2rem;line-height:1;}}
+            .bet-chip{{background:rgba({int(bet_c[1:3],16) if len(bet_c)>3 else 37},{int(bet_c[3:5],16) if len(bet_c)>5 else 37},{int(bet_c[5:7],16) if len(bet_c)>7 else 48},0.12);
+                        border:1px solid {bet_c}44;border-radius:8px;padding:7px 14px;}}
+            .bc-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{bet_c};}}
+            .bc-val{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{bet_c};line-height:1;}}
+            /* Consistency bar */
+            .cons-bar{{flex:1;min-width:120px;}}
+            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;margin-bottom:4px;}}
+            .cons-track{{height:4px;background:#0d0d15;border-radius:2px;overflow:hidden;}}
+            .cons-fill{{height:100%;background:linear-gradient(90deg,#e05a5a,#d4b44a,#4caf82);border-radius:2px;width:{int(consistency*100)}%;}}
             /* Over/under */
             .ou{{margin-bottom:16px;}}
             .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
             .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
             .or:last-child{{margin-bottom:0;}}
             .ol{{font-size:11px;font-weight:500;color:#2a2a3a;min-width:72px;}}
-            .ob{{flex:1;height:5px;background:#0d0d15;border-radius:3px;overflow:hidden;position:relative;}}
-            .fo{{height:100%;background:{pc};border-radius:3px;width:{op:.1f}%;}}
-            .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{up:.1f}%;}}
+            .ob{{flex:1;height:5px;background:#0d0d15;border-radius:3px;overflow:hidden;}}
+            .fo{{height:100%;background:{pc};border-radius:3px;width:{op:.1f}%;transition:width 1s ease-out;}}
+            .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{up:.1f}%;transition:width 1s ease-out;}}
             .op2{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;min-width:48px;text-align:right;line-height:1;}}
-            /* Chart */
             .chart-wrap{{padding-top:14px;border-top:1px solid #0d0d15;}}
-            .ct{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
-            .meta{{font-size:9px;color:#111118;margin-top:8px;padding-top:10px;border-top:1px solid #0a0a12;}}
+            .meta{{font-size:9px;color:#0d0d18;margin-top:8px;padding-top:8px;border-top:1px solid #0a0a12;
+                    display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
             </style></head><body>
             <div class="card">
                 <div class="top"></div>
@@ -751,6 +837,7 @@ with nba_tab:
                         <div>
                             <div class="nm">{result.player_name}</div>
                             <div class="sb">{loc}&nbsp;<span class="opp">{sel_opp}</span>&nbsp;&middot;&nbsp;{rest_days}d rest&nbsp;&middot;&nbsp;{location}{inj}{lu_badge}</div>
+                            <div class="badges">{vl_badge}{hit_badge}</div>
                         </div>
                     </div>
                     <span class="cf"><span class="cd"></span>{tr.confidence_label}</span>
@@ -758,7 +845,7 @@ with nba_tab:
                 <div class="body">
                     <div class="hero-row">
                         <div class="proj">
-                            <div class="pnum">{tr.predicted_value}</div>
+                            <div class="pnum" id="pred-num">0</div>
                             <div class="plbl">Projected {target_info["label"]}</div>
                         </div>
                         <div class="meter-col">
@@ -775,12 +862,29 @@ with nba_tab:
                                 <circle cx="100" cy="100" r="5" fill="#e8e6e0"/>
                             </svg>
                             <div class="meter-val">{op:.0f}%</div>
-                            <div class="meter-lbl">{tr.confidence_label}</div>
+                            <div class="meter-lbl">Over prob.</div>
                         </div>
                         <div class="sgrid">
                             <div class="sc"><div class="sv">{tr.recent_avg_5}</div><div class="sl">L5 Avg</div></div>
                             <div class="sc"><div class="sv">{tr.recent_avg_10}</div><div class="sl">L10 Avg</div></div>
                             <div class="sc"><div class="sv">{custom_line}</div><div class="sl">Line</div></div>
+                        </div>
+                    </div>
+                    <!-- Edge + bet size + consistency row -->
+                    <div class="edge-row">
+                        <div class="edge-chip">
+                            <div class="ec-lbl">Edge</div>
+                            <div class="ec-val" style="color:{'#4caf82' if edge_abs>=0 else '#e05a5a'}">
+                                {'▲' if edge_abs>=0 else '▼'}&nbsp;{abs(edge_abs)}&nbsp;<span style="font-size:0.75rem;color:#252535;">({edge_pct}%)</span>
+                            </div>
+                        </div>
+                        <div class="bet-chip">
+                            <div class="bc-lbl">Bet Size</div>
+                            <div class="bc-val">{bet_sz}</div>
+                        </div>
+                        <div class="cons-bar">
+                            <div class="cons-lbl">Consistency &nbsp; {int(consistency*100)}%</div>
+                            <div class="cons-track"><div class="cons-fill"></div></div>
                         </div>
                     </div>
                     <div class="ou">
@@ -796,12 +900,101 @@ with nba_tab:
                             <div class="op2" style="color:#4a9eff;">{up:.1f}%</div>
                         </div>
                     </div>
-                    {"" if not chart_block else f'<div class="chart-wrap"><div class="ct">Last {n if cv else ""} games &mdash; {target_info["label"]}</div>{chart_svg if cv else ""}</div>'}
-                    <div class="meta">Model AUC {tr.model_auc}&nbsp;&middot;&nbsp;Trained on 5 seasons</div>
+                    {chart_block}
+                    <div class="meta">
+                        <span>AUC {tr.model_auc}</span>
+                        <span style="color:#0a0a16">&middot;</span>
+                        <span>MAE {tr.model_mae:.2f}</span>
+                        <span style="color:#0a0a16">&middot;</span>
+                        <span>Blend: model + recency</span>
+                    </div>
                 </div>
-            </div></body></html>"""
+            </div>
+            <script>
+            (function(){{
+                var el=document.getElementById('pred-num');
+                var target={tr.predicted_value};
+                var dur=900,start=performance.now();
+                function step(now){{
+                    var p=Math.min((now-start)/dur,1);
+                    var ease=1-Math.pow(1-p,3);
+                    el.textContent=(target*ease).toFixed(1);
+                    if(p<1)requestAnimationFrame(step);
+                }}
+                requestAnimationFrame(step);
+            }})();
+            </script>
+            </body></html>"""
 
             components.html(html, height=630, scrolling=False)
+
+            # ── Why this prediction? ──────────────────────────────────────────────
+            with st.expander("🔍  Why this prediction?", expanded=False):
+                exp_c1, exp_c2 = st.columns(2)
+
+                with exp_c1:
+                    st.markdown('<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">Top Factors</div>', unsafe_allow_html=True)
+                    if tr.top_factors:
+                        for feat, imp_pct, lbl in tr.top_factors[:6]:
+                            bar_w = min(100, int(imp_pct * 5))
+                            st.markdown(f"""
+                            <div style="margin-bottom:0.5rem;">
+                                <div style="display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;">
+                                    <span style="color:#c8c6c0;">{lbl}</span>
+                                    <span style="color:#f0672a;font-weight:700;">{imp_pct:.1f}%</span>
+                                </div>
+                                <div style="height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;">
+                                    <div style="height:100%;width:{bar_w}%;background:#f0672a;border-radius:2px;"></div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.caption("Feature importance not available for this model.")
+
+                with exp_c2:
+                    st.markdown('<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">vs. This Opponent</div>', unsafe_allow_html=True)
+                    mh = tr.matchup_history
+                    if mh and mh.get("n_games", 0) > 0:
+                        mh_c = "#4caf82" if mh.get("trend","") == "up" else "#e05a5a" if mh.get("trend","") == "down" else "#d4b44a"
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.8rem 1rem;">
+                            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.6rem;text-align:center;">
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};">{mh.get("avg","—")}</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg</div>
+                                </div>
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:#4caf82;">{mh.get("hit_rate_pct","—")}%</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
+                                </div>
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{mh_c};">{mh.get("n_games","—")}</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Games</div>
+                                </div>
+                            </div>
+                            <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.5rem;text-align:center;">
+                                Trend: <span style="color:{mh_c};font-weight:700;">{mh.get("trend","—").upper()}</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.caption(f"No historical matchup data vs {sel_opp}.")
+
+                # DFS projection
+                all_preds = {t: ta.predicted_value for t, ta in result.targets.items()}
+                dfs_score = _dfs_points(all_preds)
+                if dfs_score > 0:
+                    st.markdown(f"""
+                    <div style="background:#0d0d15;border:1px solid #1a1a28;border-radius:10px;
+                                padding:0.8rem 1rem;margin-top:0.8rem;display:flex;align-items:center;gap:1rem;">
+                        <div style="font-size:1.2rem;">🎯</div>
+                        <div>
+                            <div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;">DraftKings DFS Projection</div>
+                            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">{dfs_score} <span style="font-size:0.9rem;color:#252535;">pts</span></div>
+                        </div>
+                        <div style="font-size:0.62rem;color:#1a1a28;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             # ── Log this prediction ───────────────────────────────────────────────
             log_col, share_col = st.columns(2)
@@ -829,22 +1022,145 @@ with nba_tab:
                 )
                 st.code(share_text, language=None)
 
+            # ── Add to Parlay ─────────────────────────────────────────────────────
+            if st.button(f"➕ Add to Parlay: {result.player_name} {target_info['short']} {'OVER' if op>50 else 'UNDER'} {custom_line}",
+                         use_container_width=True, key="add_parlay"):
+                parlay = st.session_state.get("parlay_legs", [])
+                leg = {
+                    "player": result.player_name,
+                    "stat":   target_info["short"],
+                    "line":   custom_line,
+                    "dir":    "OVER" if op > 50 else "UNDER",
+                    "prob":   op / 100,
+                    "conf":   tr.confidence_label,
+                }
+                if not any(l["player"] == leg["player"] and l["stat"] == leg["stat"] for l in parlay):
+                    parlay.append(leg)
+                    st.session_state["parlay_legs"] = parlay
+                    st.success(f"✅ Added {result.player_name} {target_info['short']} to parlay! ({len(parlay)} legs)")
+                else:
+                    st.info("Already in parlay.")
+
+            # ── Player Comparison ─────────────────────────────────────────────────
+            with st.expander("⚖️  Compare with another player", expanded=False):
+                cmp_player = st.selectbox("Compare against", player_options, key="cmp_player",
+                                          index=1 if len(player_options) > 1 else 0)
+                if cmp_player and cmp_player != sel_player:
+                    cmp_row = players_df[players_df["full_name"] == cmp_player]
+                    if not cmp_row.empty:
+                        with st.spinner(f"Predicting {cmp_player}..."):
+                            try:
+                                cmp_result = predict(
+                                    player_id=int(cmp_row.iloc[0]["id"]),
+                                    opponent_team_id=int(o_row["team_id"]),
+                                    opponent_name=sel_opp,
+                                    is_home=(location=="Home"),
+                                    rest_days=rest_days,
+                                    compute_matchup=False,
+                                )
+                                cmp_tr = cmp_result.targets.get(sel_target)
+                                if cmp_tr:
+                                    cmp_c1, cmp_c2 = st.columns(2)
+                                    for col, name, res_tr in [(cmp_c1, sel_player, tr), (cmp_c2, cmp_player, cmp_tr)]:
+                                        with col:
+                                            cmp_conf_c = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(res_tr.confidence_label,"#f0672a")
+                                            st.markdown(f"""
+                                            <div style="background:#0d0d15;border-radius:12px;padding:1rem;text-align:center;">
+                                                <div style="font-size:0.75rem;font-weight:700;color:#e8e6e0;margin-bottom:0.5rem;">{name.split()[-1]}</div>
+                                                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{pc};line-height:1;">{res_tr.predicted_value}</div>
+                                                <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.3rem;">proj {target_info["short"]}</div>
+                                                <div style="font-size:0.62rem;margin-top:0.5rem;">
+                                                    <span style="color:#2a2a3a;">L5: {res_tr.recent_avg_5} &nbsp;·&nbsp; L10: {res_tr.recent_avg_10}</span>
+                                                </div>
+                                                <div style="font-size:0.6rem;font-weight:700;color:{cmp_conf_c};margin-top:0.3rem;">{res_tr.confidence_label}</div>
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                            except Exception as e:
+                                st.error(f"Comparison error: {e}")
+
             with st.expander("📊  All props — this matchup", expanded=False):
-                    rows=[]
-                    for t,ta in result.targets.items():
-                        inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
-                        rows.append({"Stat":inf["label"],"Group":inf["group"],"Projected":ta.predicted_value,
-                                     "Line":ta.threshold,"Over %":f"{ta.over_prob*100:.1f}%",
-                                     "Confidence":ta.confidence_label,"MAE":ta.model_mae})
-                    if rows:
-                        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
-                            column_config={"Projected":st.column_config.NumberColumn("Projected",format="%.1f"),
-                                           "MAE":st.column_config.NumberColumn("MAE",format="%.3f")})
+                rows=[]
+                for t,ta in result.targets.items():
+                    inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
+                    hit_pct = round(ta.over_prob*100,1) if ta.over_prob > 0.5 else round((1-ta.over_prob)*100,1)
+                    rows.append({"Stat":inf["label"],"Group":inf["group"],"Projected":ta.predicted_value,
+                                 "Line":ta.threshold,
+                                 "Dir": "OVER" if ta.over_prob>0.5 else "UNDER",
+                                 "Prob %":f"{hit_pct:.1f}%",
+                                 "Confidence":ta.confidence_label,
+                                 "Bet":ta.bet_size,
+                                 "Hit Rate":ta.hit_rate_l5,
+                                 "MAE":ta.model_mae})
+                if rows:
+                    st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
+                        column_config={"Projected":st.column_config.NumberColumn("Projected",format="%.1f"),
+                                       "MAE":st.column_config.NumberColumn("MAE",format="%.3f")})
 
 # ══════════════════════════════════════════════════════════════════════════════
 # QUICK PICKS TAB
 # ══════════════════════════════════════════════════════════════════════════════
 with picks_tab:
+    # ── Parlay Builder ─────────────────────────────────────────────────────────
+    parlay_legs = st.session_state.get("parlay_legs", [])
+    if parlay_legs:
+        with st.expander(f"🎰 Parlay Builder — {len(parlay_legs)} leg{'s' if len(parlay_legs)>1 else ''}", expanded=True):
+            import math as _math
+            combined_prob = 1.0
+            for leg in parlay_legs:
+                combined_prob *= leg["prob"]
+            implied_odds = round(1 / combined_prob, 2) if combined_prob > 0 else 0
+            payout_100   = round((implied_odds - 1) * 100)
+            conf_counts  = {"High":0,"Medium":0,"Low":0}
+            for leg in parlay_legs:
+                conf_counts[leg["conf"]] = conf_counts.get(leg["conf"], 0) + 1
+
+            # Header stats
+            pc_col1, pc_col2, pc_col3, pc_col4 = st.columns(4)
+            pc_col1.metric("Legs", len(parlay_legs))
+            pc_col2.metric("Hit Probability", f"{combined_prob*100:.1f}%")
+            pc_col3.metric("Implied Odds", f"{implied_odds:.2f}x")
+            pc_col4.metric("Payout per $100", f"${payout_100}")
+
+            for i, leg in enumerate(parlay_legs):
+                lc = TEAM_COLORS.get(leg.get("team",""), "#f0672a")
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;justify-content:space-between;'
+                    f'padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.75rem;">'
+                    f'<span style="color:#f0ede8;font-weight:600;">{leg["player"]}</span>'
+                    f'<span style="color:#2a2a3a;">{leg["dir"]} {leg["line"]} {leg["stat"]}</span>'
+                    f'<span style="color:#4caf82;font-weight:700;">{leg["prob"]*100:.1f}%</span>'
+                    f'<span style="background:#1a1a28;color:#252535;border-radius:4px;padding:1px 6px;font-size:9px;">{leg["conf"]}</span>'
+                    f'</div>', unsafe_allow_html=True)
+
+            # Correlated parlay warnings
+            same_player_stats = {}
+            for leg in parlay_legs:
+                key = leg["player"]
+                same_player_stats.setdefault(key, []).append(leg["stat"])
+            corr_warnings = []
+            pts_ast_players = [p for p,stats in same_player_stats.items() if "PTS" in stats and "AST" in stats]
+            pts_reb_players = [p for p,stats in same_player_stats.items() if "PTS" in stats and "REB" in stats]
+            for p in pts_ast_players:
+                corr_warnings.append(f"⚠️ **{p}**: PTS+AST are positively correlated — treat as a single correlated leg")
+            for p in pts_reb_players:
+                corr_warnings.append(f"⚠️ **{p}**: PTS+REB are correlated — reduces true independence")
+            if len(parlay_legs) >= 4:
+                corr_warnings.append("⚠️ 4+ leg parlay: hit probability drops significantly — consider 2-3 leg parlays")
+            if conf_counts.get("Low", 0) > 0:
+                corr_warnings.append(f"⚠️ {conf_counts['Low']} Low-confidence leg(s) — weakens overall parlay edge")
+            if corr_warnings:
+                for w in corr_warnings:
+                    st.warning(w)
+
+            cl1, cl2 = st.columns(2)
+            with cl1:
+                if st.button("🗑 Clear Parlay", key="clear_parlay"):
+                    st.session_state["parlay_legs"] = []
+                    st.rerun()
+            with cl2:
+                parlay_share = "\n".join([f"{l['player']} {l['dir']} {l['line']} {l['stat']} ({l['prob']*100:.1f}%)" for l in parlay_legs])
+                st.code(f"🎰 LineBreaker Parlay ({len(parlay_legs)} legs)\n{parlay_share}\nCombined: {combined_prob*100:.1f}% | {implied_odds:.2f}x", language=None)
+
     st.markdown("""
     <div style="margin-bottom:1.2rem;">
         <div style="font-size:1.4rem;font-weight:700;color:#f0ede8;margin-bottom:0.3rem;">⚡ Today's Best Picks</div>
@@ -860,11 +1176,13 @@ with picks_tab:
     with col_f3:
         qp_n = st.slider("Top N", 5, 25, 10, key="qp_n")
 
-    gen_col, ref_col = st.columns([3, 1])
+    gen_col, ref_col, export_col = st.columns([3, 1, 1])
     with gen_col:
         gen_btn = st.button("⚡ Generate Quick Picks", use_container_width=True, type="primary", key="qp_gen")
     with ref_col:
         clear_btn = st.button("🗑 Clear", use_container_width=True, key="qp_clear")
+    with export_col:
+        export_btn = st.button("📥 CSV", use_container_width=True, key="qp_export", help="Export picks as CSV")
 
     if gen_btn:
         import time as _time
@@ -876,6 +1194,47 @@ with picks_tab:
         st.session_state.pop("qp_result", None)
         st.session_state.pop("qp_seed", None)
         st.rerun()
+
+    # CSV export
+    if export_btn:
+        qp_export_df = st.session_state.get("qp_result")
+        if qp_export_df is not None and not qp_export_df.empty:
+            import io as _io
+            csv_buf = _io.StringIO()
+            qp_export_df.to_csv(csv_buf, index=False)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv_buf.getvalue(),
+                file_name="linebreaker_picks.csv",
+                mime="text/csv",
+                key="qp_dl_csv",
+            )
+        else:
+            st.info("Generate picks first, then export.")
+
+    # Weekly Best Bets board
+    try:
+        from data.accuracy_tracker import get_weekly_best as _get_weekly_best
+        weekly_best = _get_weekly_best(days=7)
+        if weekly_best:
+            with st.expander(f"🏆 Weekly Best Bets — Top {min(5, len(weekly_best))} (last 7 days)", expanded=False):
+                for i, wb in enumerate(weekly_best[:5], 1):
+                    tinfo_wb = TARGET_DISPLAY.get(wb["target"], {"short": wb["target"]})
+                    icon_wb  = "✅" if wb.get("correct") else "❌" if wb.get("resolved") else "⏳"
+                    st.markdown(f"""
+                    <div style="display:flex;align-items:center;gap:0.8rem;padding:0.5rem 0;border-bottom:1px solid #0d0d15;">
+                        <div style="font-size:0.65rem;font-weight:700;color:#f0672a;min-width:20px;">#{i}</div>
+                        <div style="flex:1;font-size:0.72rem;">
+                            <strong style="color:#e8e6e0;">{wb["player_name"]}</strong>
+                            <span style="color:#2a2a3a;margin-left:6px;">{tinfo_wb.get("short","?")} {wb.get("pick","")} {wb.get("custom_line","")}</span>
+                        </div>
+                        <div style="font-size:0.65rem;color:#4caf82;font-weight:700;">{wb.get("over_prob",0):.1f}%</div>
+                        <div style="font-size:0.65rem;color:#2a2a3a;">{wb.get("confidence","")}</div>
+                        <div>{icon_wb}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    except Exception:
+        pass
 
     seed = st.session_state.get("qp_seed", 0)
     if seed > 0 and "qp_result" not in st.session_state:
@@ -1019,6 +1378,17 @@ with picks_tab:
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                    # Add to Parlay button (inline, small)
+                    if st.button(f"➕ Parlay", key=f"qp_parlay_{rank}_{row['player'][:6]}",
+                                 help=f"Add {row['player']} {row['short']} to parlay"):
+                        parlay_legs = st.session_state.get("parlay_legs", [])
+                        leg = {"player": row["player"], "stat": row["short"],
+                               "line": row["line"], "dir": row["direction"],
+                               "prob": row["over_prob"]/100, "conf": row["confidence"]}
+                        if not any(l["player"]==leg["player"] and l["stat"]==leg["stat"] for l in parlay_legs):
+                            parlay_legs.append(leg)
+                            st.session_state["parlay_legs"] = parlay_legs
+                            st.rerun()
             except Exception as e:
                 import traceback
                 st.error(f"Display error: {e}")
@@ -1055,9 +1425,12 @@ with accuracy_tab:
         acc_c   = "#4caf82" if acc >= 55 else "#d4b44a" if acc >= 50 else "#e05a5a"
         r_acc   = stats["recent_30d"]["accuracy"]
         r_acc_c = "#4caf82" if r_acc >= 55 else "#d4b44a" if r_acc >= 50 else "#e05a5a"
+        u_profit = stats.get("units_profit", 0.0)
+        u_profit_c = "#4caf82" if u_profit >= 0 else "#e05a5a"
+        u_roi    = stats.get("roi", 0.0)
 
         st.markdown(f"""
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.8rem;margin-bottom:1.5rem;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.8rem;margin-bottom:1rem;">
             <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
                 <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{acc_c};line-height:1;">{acc:.1f}%</div>
                 <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Overall</div>
@@ -1073,6 +1446,30 @@ with accuracy_tab:
             <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
                 <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:#4caf82;line-height:1;">{stats["streak"]}</div>
                 <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Win Streak</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Unit P&L row
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.8rem;margin-bottom:1.5rem;">
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:{u_profit_c};line-height:1;">
+                    {'+' if u_profit >= 0 else ''}{u_profit:.2f}u
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Unit P&amp;L (-110 odds)</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:{u_profit_c};line-height:1;">
+                    {'+' if u_roi >= 0 else ''}{u_roi:.1f}%
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">ROI</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">
+                    {stats.get("units_wagered",0):.1f}u
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Units Wagered</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1097,6 +1494,11 @@ with accuracy_tab:
 
         # Recent picks log
         st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Recent Picks</div>', unsafe_allow_html=True)
+        try:
+            from data.accuracy_tracker import manual_resolve as _manual_resolve, add_note as _add_note, get_all_predictions as _get_all_preds
+            ACC_FULL = True
+        except ImportError:
+            ACC_FULL = False
         recent = get_recent_predictions(15)
         for p in recent:
             if p.get("resolved") and p.get("correct") is not None:
@@ -1106,15 +1508,47 @@ with accuracy_tab:
                 icon   = "⏳"
                 actual = "Pending"
             tinfo = TARGET_DISPLAY.get(p["target"], {"short": p["target"]})
+            note_txt = f" · 📝 {p['note']}" if p.get("note") else ""
             st.markdown(f"""
             <div style="display:flex;align-items:center;justify-content:space-between;
                         padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.72rem;">
                 <div>{icon} <strong style="color:#e8e6e0;">{p["player_name"]}</strong>
                     <span style="color:#2a2a3a;margin-left:4px;">{tinfo.get("short","?")} {p["pick"]} {p["custom_line"]}</span>
+                    <span style="color:#1a1a28;">{note_txt}</span>
                 </div>
                 <div style="color:#2a2a3a;">{actual} · {p.get("game_date","")}</div>
             </div>
             """, unsafe_allow_html=True)
+
+        # Manual resolve section
+        if ACC_FULL and recent:
+            with st.expander("📝  Manual resolve / add note", expanded=False):
+                pending_picks = [p for p in recent if not p.get("resolved")]
+                if pending_picks:
+                    resolve_opts = [f"{p['player_name']} — {p['target']} {p['pick']} {p['custom_line']} ({p.get('game_date','')})" for p in pending_picks]
+                    resolve_sel = st.selectbox("Pick to resolve", resolve_opts, key="acc_resolve_sel")
+                    resolve_idx = resolve_opts.index(resolve_sel)
+                    resolve_actual = st.number_input("Actual result", min_value=0.0, step=0.5, key="acc_actual_val")
+                    res_col1, res_col2 = st.columns(2)
+                    with res_col1:
+                        if st.button("✅ Resolve Pick", use_container_width=True, key="acc_resolve_btn"):
+                            try:
+                                _manual_resolve(pending_picks[resolve_idx]["id"], resolve_actual)
+                                st.success("Resolved!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                    note_input = st.text_input("Add note (optional)", key="acc_note_input", placeholder="e.g. DNP, injured, blowout")
+                    with res_col2:
+                        if note_input and st.button("📝 Save Note", use_container_width=True, key="acc_note_btn"):
+                            try:
+                                _add_note(pending_picks[resolve_idx]["id"], note_input)
+                                st.success("Note saved!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                else:
+                    st.info("No pending picks to resolve.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NFL TAB

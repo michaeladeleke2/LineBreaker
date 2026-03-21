@@ -57,6 +57,10 @@ class TargetResult:
     recent_avg_10:    float
     model_mae:        float
     model_auc:        float
+    # Enhanced accuracy fields
+    consistency_score: float = 1.0   # 0 (volatile) → 1 (very consistent)
+    hit_rate_l5:       str   = ""    # e.g. "4/5 HIT" — recent hit rate vs line
+    bet_size:          str   = "1u"  # Recommended bet size (1u / 2u / 3u)
 
 
 @dataclass
@@ -162,6 +166,112 @@ def _compute_recent_combo(recent: pd.DataFrame, target: str, n: int) -> float:
     return _get_recent_avg(recent, target, n)
 
 
+# ── Accuracy helpers ──────────────────────────────────────────────────────────
+
+def _compute_recent_vals(recent: pd.DataFrame, target: str, n: int) -> list:
+    """Return raw recent game values for a target (used for consistency + hit-rate)."""
+    from features.engineer import COMBO_TARGETS
+    if target in COMBO_TARGETS:
+        parts = COMBO_TARGETS[target]
+        available = [p for p in parts if p in recent.columns]
+        if not available:
+            return []
+        return recent[available].apply(pd.to_numeric, errors="coerce").sum(axis=1).tail(n).dropna().tolist()
+    if target not in recent.columns:
+        return []
+    return pd.to_numeric(recent[target], errors="coerce").tail(n).dropna().tolist()
+
+
+def _smart_blend(model_pred: float, recent_vals: list) -> tuple:
+    """
+    Blend model prediction with exponentially-weighted recent average.
+    More weight on model for consistent players; more weight on recent form
+    for volatile players.
+
+    Returns (blended_pred, consistency_score)
+    """
+    if len(recent_vals) < 3:
+        return model_pred, 1.0
+
+    n     = min(len(recent_vals), 8)
+    vals  = recent_vals[-n:]
+    # Exponential weights — most recent game gets highest weight
+    raw_w = [0.30, 0.20, 0.15, 0.12, 0.09, 0.07, 0.04, 0.03][:n]
+    total = sum(raw_w)
+    weights = [w / total for w in raw_w]
+    weighted_avg = sum(v * w for v, w in zip(reversed(vals), weights))
+
+    # Coefficient of variation — measures volatility
+    mean_v = sum(vals) / len(vals) if vals else 1
+    if mean_v > 0 and len(vals) >= 3:
+        var = sum((v - mean_v) ** 2 for v in vals) / len(vals)
+        cv  = var ** 0.5 / mean_v
+    else:
+        cv = 0.5
+
+    # Blend weights: consistent player → trust model more, volatile → lean on recency
+    model_w = 0.80 if cv < 0.15 else (0.70 if cv < 0.30 else 0.60)
+    blended = round(model_w * model_pred + (1 - model_w) * weighted_avg, 1)
+    consistency = round(max(0.0, 1 - min(cv, 1.0)), 2)
+
+    return max(blended, 0.0), consistency
+
+
+def _hit_rate_and_adjustment(over_prob: float, recent_vals: list, threshold: float) -> tuple:
+    """
+    Adjust over_prob slightly based on recent hit-rate vs the line.
+    Returns (adjusted_prob, hit_rate_label)
+    """
+    if len(recent_vals) < 3:
+        return over_prob, ""
+
+    recent5  = recent_vals[-5:] if len(recent_vals) >= 5 else recent_vals
+    hits     = sum(1 for v in recent5 if v > threshold)
+    n5       = len(recent5)
+    hit_rate = hits / n5
+
+    # Small nudge toward recent reality — capped at ±6 percentage points
+    adjustment = (hit_rate - 0.5) * 0.12
+    adjusted   = max(0.05, min(0.95, over_prob + adjustment))
+
+    label = f"{hits}/{n5} HIT"
+    return round(adjusted, 3), label
+
+
+def _confidence_label_v2(over_prob: float, consistency: float, n_games: int) -> str:
+    """
+    Richer confidence that considers probability, player consistency, and sample size.
+    """
+    p = max(over_prob, 1 - over_prob)
+    score = 0
+
+    # Probability component (0–3)
+    if p >= 0.75:   score += 3
+    elif p >= 0.65: score += 2
+    elif p >= 0.58: score += 1
+
+    # Consistency component (0–1)
+    if consistency >= 0.75 and n_games >= 6:
+        score += 1
+
+    # Sample size penalty
+    if n_games < 4:
+        score = max(0, score - 1)
+
+    if score >= 4:   return "High"
+    if score >= 2:   return "Medium"
+    return "Low"
+
+
+def _bet_size(confidence: str, edge_norm: float) -> str:
+    """Recommend a bet size based on confidence and normalized edge."""
+    if confidence == "High" and edge_norm >= 1.5:
+        return "3u"
+    if confidence in ("High", "Medium") and edge_norm >= 0.8:
+        return "2u"
+    return "1u"
+
+
 # ── Core prediction ───────────────────────────────────────────────────────────
 
 def predict(
@@ -224,24 +334,46 @@ def predict(
         target_meta = metadata["targets"].get(target, {})
         threshold   = target_meta.get("threshold", DEFAULT_THRESHOLDS.get(target, 10))
 
-        predicted_value = float(max(reg.predict(feat_row)[0], 0.0))
-        over_prob       = float(cls.predict_proba(feat_row)[0][1])
-        under_prob      = 1.0 - over_prob
+        model_pred    = float(max(reg.predict(feat_row)[0], 0.0))
+        raw_over_prob = float(cls.predict_proba(feat_row)[0][1])
 
         recent_avg_5  = _compute_recent_combo(recent_games, target, 5)
         recent_avg_10 = _compute_recent_combo(recent_games, target, 10)
 
+        # ── Smart accuracy layer ─────────────────────────────────────────
+        recent_raw = _compute_recent_vals(recent_games, target, 10)
+
+        # 1. Blend model prediction with exponentially-weighted recent form
+        predicted_value, consistency = _smart_blend(model_pred, recent_raw)
+
+        # 2. Adjust over_prob based on recent hit-rate vs the line
+        adj_over_prob, hit_rate_label = _hit_rate_and_adjustment(
+            raw_over_prob, recent_raw, threshold)
+
+        under_prob = 1.0 - adj_over_prob
+
+        # 3. Enhanced confidence: probability + consistency + sample size
+        confidence = _confidence_label_v2(adj_over_prob, consistency, len(recent_raw))
+
+        # 4. Normalized edge for bet sizing
+        mae      = target_meta.get("reg_cv_mae", 1.0) or 1.0
+        edge_n   = abs(predicted_value - threshold) / mae
+        bet_sz   = _bet_size(confidence, edge_n)
+
         target_results[target] = TargetResult(
-            target           = target,
-            predicted_value  = round(predicted_value, 1),
-            over_prob        = round(over_prob,  3),
-            under_prob       = round(under_prob, 3),
-            threshold        = threshold,
-            confidence_label = _confidence_label(over_prob),
-            recent_avg_5     = recent_avg_5,
-            recent_avg_10    = recent_avg_10,
-            model_mae        = target_meta.get("reg_cv_mae", 0.0),
-            model_auc        = target_meta.get("cls_cv_auc", 0.0),
+            target            = target,
+            predicted_value   = round(predicted_value, 1),
+            over_prob         = round(adj_over_prob, 3),
+            under_prob        = round(under_prob,     3),
+            threshold         = threshold,
+            confidence_label  = confidence,
+            recent_avg_5      = recent_avg_5,
+            recent_avg_10     = recent_avg_10,
+            model_mae         = target_meta.get("reg_cv_mae", 0.0),
+            model_auc         = target_meta.get("cls_cv_auc", 0.0),
+            consistency_score = consistency,
+            hit_rate_l5       = hit_rate_label,
+            bet_size          = bet_sz,
         )
 
     # ── Injury + lineup adjustment ───────────────────────────────────────────
@@ -276,17 +408,23 @@ def predict(
             mae  = tr.model_mae if tr.model_mae > 0 else 1.0
             diff = (adjusted - tr.threshold) / mae
             adj_over = round(1 / (1 + math.exp(-1.2 * diff)), 3)
+            mae_i    = tr.model_mae if tr.model_mae > 0 else 1.0
+            edge_ni  = abs(adjusted - tr.threshold) / mae_i
+            conf_i   = _confidence_label_v2(adj_over, tr.consistency_score, 5)
             target_results[target] = TargetResult(
-                target           = tr.target,
-                predicted_value  = adjusted,
-                over_prob        = adj_over,
-                under_prob       = round(1 - adj_over, 3),
-                threshold        = tr.threshold,
-                confidence_label = _confidence_label(adj_over),
-                recent_avg_5     = tr.recent_avg_5,
-                recent_avg_10    = tr.recent_avg_10,
-                model_mae        = tr.model_mae,
-                model_auc        = tr.model_auc,
+                target            = tr.target,
+                predicted_value   = adjusted,
+                over_prob         = adj_over,
+                under_prob        = round(1 - adj_over, 3),
+                threshold         = tr.threshold,
+                confidence_label  = conf_i,
+                recent_avg_5      = tr.recent_avg_5,
+                recent_avg_10     = tr.recent_avg_10,
+                model_mae         = tr.model_mae,
+                model_auc         = tr.model_auc,
+                consistency_score = tr.consistency_score,
+                hit_rate_l5       = tr.hit_rate_l5,
+                bet_size          = _bet_size(conf_i, edge_ni),
             )
 
     return PredictionResult(
