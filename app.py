@@ -216,6 +216,16 @@ def load_lineups():
     try: return fetch_all_lineups()
     except: return pd.DataFrame()
 
+@st.cache_data(show_spinner=False)
+def _compute_picks_cached(conf: str, top_n: int, seed: int) -> pd.DataFrame:
+    """Cache picks by seed so reruns don't restart computation."""
+    try:
+        from models.quick_picks import generate_quick_picks
+        min_conf = None if conf == "All" else conf
+        return generate_quick_picks(top_n=top_n, min_confidence=min_conf)
+    except Exception as e:
+        return pd.DataFrame()
+
 
 if "season_refreshed" not in st.session_state:
     # Show branded overlay — hides all Streamlit content behind it
@@ -806,9 +816,9 @@ with nba_tab:
 # ══════════════════════════════════════════════════════════════════════════════
 with picks_tab:
     st.markdown("""
-    <div style="margin-bottom:1.5rem;">
-        <div style="font-size:1.4rem;font-weight:700;color:#f0ede8;margin-bottom:0.3rem;">Today's Best Picks</div>
-        <div style="font-size:0.72rem;color:#2a2a3a;">Highest-edge plays based on model vs default line. Ranked by confidence edge.</div>
+    <div style="margin-bottom:1.2rem;">
+        <div style="font-size:1.4rem;font-weight:700;color:#f0ede8;margin-bottom:0.3rem;">⚡ Today's Best Picks</div>
+        <div style="font-size:0.72rem;color:#2a2a3a;">Highest-edge plays ranked by model confidence. Scan the full slate in seconds.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -820,73 +830,115 @@ with picks_tab:
     with col_f3:
         qp_n = st.slider("Top N", 5, 25, 10, key="qp_n")
 
-    if st.button("⚡ Generate Quick Picks", use_container_width=True, type="primary"):
-        with st.spinner("Scanning today's slate… this takes 1–2 minutes"):
-            try:
-                from models.quick_picks import generate_quick_picks
-                min_conf = None if qp_conf == "All" else qp_conf
-                qp_result = generate_quick_picks(top_n=qp_n, min_confidence=min_conf)
-                st.session_state["qp_result"] = qp_result
-                st.session_state["qp_dir_filter"] = qp_dir
-            except Exception as e:
-                st.error(f"Error generating picks: {e}")
+    gen_col, ref_col = st.columns([3, 1])
+    with gen_col:
+        gen_btn = st.button("⚡ Generate Quick Picks", use_container_width=True, type="primary", key="qp_gen")
+    with ref_col:
+        clear_btn = st.button("🗑 Clear", use_container_width=True, key="qp_clear")
+
+    if gen_btn:
+        import time as _time
+        st.session_state["qp_seed"] = int(_time.time())
+        st.session_state.pop("qp_result", None)
+
+    if clear_btn:
+        st.session_state.pop("qp_result", None)
+        st.session_state.pop("qp_seed", None)
+        st.rerun()
+
+    seed = st.session_state.get("qp_seed", 0)
+    if seed > 0 and "qp_result" not in st.session_state:
+        with st.spinner("Scanning today's slate… preloading player data and running predictions"):
+            df = _compute_picks_cached(qp_conf, qp_n, seed)
+            st.session_state["qp_result"] = df
+            st.session_state["qp_dir_filter"] = qp_dir
 
     # Display from session state (survives tab switches)
-    qp_df = st.session_state.get("qp_result", pd.DataFrame())
+    qp_df = st.session_state.get("qp_result")
     qp_dir_filter = st.session_state.get("qp_dir_filter", "All")
 
-    if not qp_df.empty:
-        try:
-            if qp_dir_filter != "All":
-                qp_df = qp_df[qp_df["direction"] == qp_dir_filter]
-            if qp_df.empty:
-                st.info(f"No {qp_dir_filter} picks. Try removing the direction filter.")
+    if qp_df is None:
+        st.markdown("""
+        <div style="text-align:center;padding:3rem;color:#2a2a3a;">
+            <div style="font-size:3rem;margin-bottom:1rem;">⚡</div>
+            <div style="font-size:1rem;font-weight:600;color:#3a3a4a;">No picks yet</div>
+            <div style="font-size:0.72rem;margin-top:0.5rem;">
+                Click <strong style="color:#f0672a;">Generate Quick Picks</strong> to scan today's slate.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    elif qp_df.empty:
+        st.info("No picks found for today's slate. Check that there are NBA games scheduled today.")
+    else:
+        # Apply direction filter
+        display_df = qp_df.copy()
+        if qp_dir_filter != "All":
+            display_df = display_df[display_df["direction"] == qp_dir_filter]
+        if display_df.empty:
+            st.info(f"No {qp_dir_filter} picks. Try removing the direction filter.")
+        else:
+            st.markdown(f'<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.8rem;">{len(display_df)} picks found</div>', unsafe_allow_html=True)
+            try:
+                for _, row in display_df.iterrows():
+                    arrow    = "⬆" if row["direction"] == "OVER" else "⬇"
+                    pc       = TEAM_COLORS.get(row["team"], "#f0672a")
+                    conf_c   = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
+                    edge_w   = min(100, int(row["edge"] * 15))
+                    trend    = row.get("trend", "→")
+                    l5       = row.get("l5_avg", 0)
+                    l10      = row.get("l10_avg", 0)
+                    try:
+                        r2,g2,b2 = int(pc[1:3],16),int(pc[3:5],16),int(pc[5:7],16)
+                        pc_bg = f"rgba({r2},{g2},{b2},0.06)"
+                    except:
+                        pc_bg = "#0a0a12"
 
-            for _, row in qp_df.iterrows():
-                arrow   = "⬆" if row["direction"] == "OVER" else "⬇"
-                pc      = TEAM_COLORS.get(row["team"], "#f0672a")
-                conf_c  = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
-                edge_w  = min(100, int(row["edge"] * 20))
-
-                st.markdown(f"""
-                <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;
-                            padding:1rem 1.2rem;margin-bottom:0.6rem;
-                            border-left:3px solid {pc};">
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
-                        <div>
-                            <span style="font-size:1rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
-                            <span style="font-size:0.7rem;color:#2a2a3a;margin-left:0.5rem;">{row["team"]} vs {row["opponent"]}</span>
-                        </div>
-                        <span style="background:rgba(76,175,130,0.1);color:{conf_c};border:1px solid {conf_c}44;
-                                     border-radius:20px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:1px;">
-                            {row["confidence"].upper()}
-                        </span>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:1rem;">
-                        <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:{pc};line-height:1;">
-                            {arrow} {row["short"]}
-                        </div>
-                        <div>
-                            <div style="font-size:0.7rem;color:#2a2a3a;">Proj <strong style="color:#e8e6e0;">{row["predicted"]}</strong>
-                                &nbsp;vs line <strong style="color:#e8e6e0;">{row["line"]}</strong>
-                                &nbsp;· {row["direction"]} {row["over_prob"]}%
+                    st.markdown(f"""
+                    <div style="background:{pc_bg};border:1px solid rgba(255,255,255,0.06);border-radius:12px;
+                                padding:1rem 1.2rem;margin-bottom:0.5rem;border-left:3px solid {pc};">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem;">
+                            <div>
+                                <span style="font-size:1rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
+                                <span style="font-size:0.68rem;color:#2a2a3a;margin-left:0.5rem;">{row["team"]} vs {row["opponent"]}</span>
                             </div>
-                            <div style="margin-top:0.3rem;display:flex;align-items:center;gap:0.5rem;">
-                                <div style="font-size:9px;color:#2a2a3a;text-transform:uppercase;letter-spacing:1px;">Edge</div>
-                                <div style="flex:1;height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;min-width:80px;">
-                                    <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
+                            <div style="display:flex;align-items:center;gap:6px;">
+                                <span style="font-size:0.68rem;color:#f0672a;">{trend}</span>
+                                <span style="background:rgba(76,175,130,0.08);color:{conf_c};border:1px solid {conf_c}33;
+                                             border-radius:20px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:1px;">
+                                    {row["confidence"].upper()}
+                                </span>
+                            </div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:1.2rem;">
+                            <div style="font-family:'Bebas Neue',sans-serif;font-size:2.2rem;color:{pc};line-height:1;min-width:80px;">
+                                {arrow} {row["short"]}
+                            </div>
+                            <div style="flex:1;">
+                                <div style="font-size:0.7rem;color:#3a3a4a;margin-bottom:4px;">
+                                    Proj&nbsp;<strong style="color:#e8e6e0;">{row["predicted"]}</strong>
+                                    &nbsp;· Line&nbsp;<strong style="color:#e8e6e0;">{row["line"]}</strong>
+                                    &nbsp;· {row["direction"]}&nbsp;<strong style="color:{pc};">{row["over_prob"]}%</strong>
                                 </div>
-                                <div style="font-size:10px;font-weight:600;color:{pc};">{row["edge"]:.1f}x</div>
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                                    <span style="font-size:9px;color:#2a2a3a;text-transform:uppercase;letter-spacing:1px;min-width:28px;">Edge</span>
+                                    <div style="flex:1;height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;">
+                                        <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
+                                    </div>
+                                    <span style="font-size:10px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
+                                </div>
+                                <div style="font-size:9px;color:#252535;">
+                                    L5&nbsp;<strong style="color:#e8e6e0;">{l5}</strong>
+                                    &nbsp;·&nbsp;L10&nbsp;<strong style="color:#e8e6e0;">{l10}</strong>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-                """, unsafe_allow_html=True)
-        except Exception as e:
-            import traceback
-            st.error(f"Quick picks error: {e}")
-            with st.expander("Details"):
-                st.code(traceback.format_exc())
+                    """, unsafe_allow_html=True)
+            except Exception as e:
+                import traceback
+                st.error(f"Display error: {e}")
+                with st.expander("Details"):
+                    st.code(traceback.format_exc())
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ACCURACY TAB

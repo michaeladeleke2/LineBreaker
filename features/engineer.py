@@ -258,11 +258,13 @@ def build_player_features(
     rest_days: int,
     season: str = None,
     n_recent: int = 10,
+    fm: pd.DataFrame = None,
 ) -> pd.DataFrame:
     from data.fetch_data import CURRENT_SEASON as _CUR
     if season is None:
         season = _CUR
-    fm = _get_cached_fm()
+    if fm is None:
+        fm = _get_cached_fm()
     player_games = fm[fm["player_id"] == player_id].sort_values("game_date")
 
     if player_games.empty:

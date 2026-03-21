@@ -123,9 +123,12 @@ def _confidence_label(over_prob: float) -> str:
     return "Low"
 
 
-def get_recent_form(player_id: int, n: int = 10) -> pd.DataFrame:
+def get_recent_form(player_id: int, n: int = 10, preloaded_gamelogs: pd.DataFrame = None) -> pd.DataFrame:
     """Return last n games with key stats for the form chart."""
-    logs = get_player_gamelogs(player_id)
+    if preloaded_gamelogs is not None:
+        logs = preloaded_gamelogs[preloaded_gamelogs["player_id"] == player_id].copy()
+    else:
+        logs = get_player_gamelogs(player_id)
     keep = [c for c in ["game_date", "pts", "reb", "ast", "stl", "blk",
                          "fg3m", "min", "matchup", "wl"] if c in logs.columns]
     recent = logs[keep].tail(n).copy()
@@ -171,6 +174,9 @@ def predict(
     targets:              list  = None,
     preloaded_injury_df         = None,
     preloaded_lineup_df         = None,
+    preloaded_fm:               pd.DataFrame = None,
+    preloaded_players_df:       pd.DataFrame = None,
+    preloaded_gamelogs:         pd.DataFrame = None,
 ) -> PredictionResult:
     """
     Generate predictions across all (or specified) stat targets
@@ -191,6 +197,7 @@ def predict(
         is_home          = is_home,
         rest_days        = rest_days,
         season           = season,
+        fm               = preloaded_fm,
     )
 
     feature_cols = metadata["feature_cols"]
@@ -200,11 +207,11 @@ def predict(
     feat_row = feat_row[feature_cols]
 
     # Recent form
-    recent_games = get_recent_form(player_id, n=10)
+    recent_games = get_recent_form(player_id, n=10, preloaded_gamelogs=preloaded_gamelogs)
 
     # Player name
-    players_df  = get_all_players()
-    player_row  = players_df[players_df["id"] == player_id]
+    _players    = preloaded_players_df if preloaded_players_df is not None else get_all_players()
+    player_row  = _players[_players["id"] == player_id]
     player_name = player_row["full_name"].values[0] if not player_row.empty else f"Player {player_id}"
 
     # Predict each target
