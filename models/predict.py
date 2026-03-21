@@ -26,6 +26,7 @@ from features.engineer import (
     get_feature_cols,
     ALL_TARGETS,
     DEFAULT_THRESHOLDS,
+    _get_cached_fm,
 )
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
@@ -161,13 +162,15 @@ def _compute_recent_combo(recent: pd.DataFrame, target: str, n: int) -> float:
 # ── Core prediction ───────────────────────────────────────────────────────────
 
 def predict(
-    player_id:        int,
-    opponent_team_id: int,
-    opponent_name:    str,
-    is_home:          bool = True,
-    rest_days:        int  = 2,
-    season:           str  = None,
-    targets:          list = None,
+    player_id:            int,
+    opponent_team_id:     int,
+    opponent_name:        str,
+    is_home:              bool  = True,
+    rest_days:            int   = 2,
+    season:               str   = None,
+    targets:              list  = None,
+    preloaded_injury_df         = None,
+    preloaded_lineup_df         = None,
 ) -> PredictionResult:
     """
     Generate predictions across all (or specified) stat targets
@@ -234,7 +237,7 @@ def predict(
             model_auc        = target_meta.get("cls_cv_auc", 0.0),
         )
 
-    # ── Injury + lineup adjustment (use preloaded data to avoid re-fetching) ──
+    # ── Injury + lineup adjustment ───────────────────────────────────────────
     try:
         _inj_df    = preloaded_injury_df if preloaded_injury_df is not None else fetch_injury_report()
         inj_status = get_player_injury(player_name, _inj_df)
@@ -300,7 +303,7 @@ def get_teams_for_ui() -> pd.DataFrame:
 
 
 def get_players_for_ui(active_only: bool = True) -> pd.DataFrame:
-    fm        = build_feature_matrix()
+    fm        = _get_cached_fm()
     valid_ids = set(fm["player_id"].unique())
 
     base = get_all_players()

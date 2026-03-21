@@ -15,13 +15,19 @@ sys.path.append(str(ROOT))
 from models.predict import predict, get_players_for_ui, get_teams_for_ui, get_available_targets, TARGET_DISPLAY, TARGET_GROUPS
 from features.engineer import DEFAULT_THRESHOLDS, COMBO_TARGETS
 from data.fetch_data import fetch_today_slate, fetch_team_records, refresh_current_season
+try:
+    from data.fetch_lines import compute_edge
+    from data.accuracy_tracker import log_prediction, resolve_predictions, get_accuracy_stats, get_recent_predictions
+    TRACKING_ENABLED = True
+except ImportError:
+    TRACKING_ENABLED = False
+    def compute_edge(*a, **k): return {}
+    def log_prediction(*a, **k): return {}
+    def resolve_predictions(*a, **k): return 0
+    def get_accuracy_stats(*a, **k): return {'total':0,'correct':0,'accuracy':0.0,'streak':0,'by_target':{},'recent_30d':{'total':0,'correct':0,'accuracy':0.0}}
+    def get_recent_predictions(*a, **k): return []
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
-from data.fetch_nfl import (
-    fetch_nfl_teams, fetch_all_nfl_players, fetch_nfl_gamelog,
-    predict_nfl_prop, get_nfl_player_headshot, fetch_nfl_today_slate,
-    NFL_TARGET_DISPLAY, NFL_TARGET_GROUPS, NFL_THRESHOLDS, NFL_TEAM_COLORS, NFL_SEASON,
-)
 
 TEAM_COLORS = {
     "ATL":"#E03A3E","BOS":"#007A33","BKN":"#AAAAAA","CHA":"#00788C",
@@ -210,20 +216,6 @@ def load_lineups():
     try: return fetch_all_lineups()
     except: return pd.DataFrame()
 
-@st.cache_data(show_spinner=False, ttl=86400)
-def load_nfl_teams():
-    try: return fetch_nfl_teams()
-    except: return pd.DataFrame()
-
-@st.cache_data(show_spinner=False, ttl=86400)
-def load_nfl_players():
-    try: return fetch_all_nfl_players()
-    except: return pd.DataFrame()
-
-@st.cache_data(show_spinner=False, ttl=300)
-def load_nfl_slate():
-    try: return fetch_nfl_today_slate()
-    except: return []
 
 if "season_refreshed" not in st.session_state:
     # Show branded overlay — hides all Streamlit content behind it
@@ -263,9 +255,6 @@ if "season_refreshed" not in st.session_state:
     team_records  = load_records()
     injury_df     = load_injuries()
     lineup_df     = load_lineups()
-    nfl_teams_df  = load_nfl_teams()
-    nfl_players_df= load_nfl_players()
-    nfl_slate     = load_nfl_slate()
     st.session_state["season_refreshed"] = True
     overlay.empty()  # Remove overlay — page appears fully loaded
 else:
@@ -276,9 +265,6 @@ else:
     team_records  = load_records()
     injury_df     = load_injuries()
     lineup_df     = load_lineups()
-    nfl_teams_df  = load_nfl_teams()
-    nfl_players_df= load_nfl_players()
-    nfl_slate     = load_nfl_slate()
 
 player_options = players_df["full_name"].tolist()
 team_options   = teams_df["team_abbreviation"].tolist()
@@ -291,12 +277,61 @@ for group in TARGET_GROUPS:
             stat_options.append(d)
             stat_map[d] = target
 
-# ── Ticker ────────────────────────────────────────────────────────────────────
-TICKS = [("LeBron James","PTS 18.6","h"),("Steph Curry","3PM 3.8","u"),
-         ("Luka Doncic","AST 8.1","u"),("Giannis","REB 10.8","h"),
-         ("Jayson Tatum","PTS 25.4","u"),("Nikola Jokic","PRA 52.1","h"),
-         ("Shai SGA","PTS 31.2","h"),("Wembanyama","BLK 3.2","h"),
-         ("Anthony Davis","BLK 2.4","u"),("Kevin Durant","PTS 27.3","u")]
+# ── Ticker — built from real player averages ─────────────────────────────────
+def _build_ticker(_players_df):
+    """Build ticker from actual current-season averages read from the feature matrix."""
+    stars = [
+        ("Shai Gilgeous-Alexander", "pts"),
+        ("Nikola Jokic",            "pra"),
+        ("Luka Doncic",             "pts"),
+        ("Giannis Antetokounmpo",   "reb"),
+        ("Jayson Tatum",            "pts"),
+        ("Stephen Curry",           "fg3m"),
+        ("LeBron James",            "pts"),
+        ("Victor Wembanyama",       "blk"),
+        ("Anthony Davis",           "blk"),
+        ("Kevin Durant",            "pts"),
+        ("Tyrese Haliburton",       "ast"),
+        ("Donovan Mitchell",        "pts"),
+    ]
+    LABELS = {"pts":"PTS","reb":"REB","ast":"AST","blk":"BLK","fg3m":"3PM","pra":"PRA"}
+    ticks = []
+    try:
+        fm_path = ROOT / "data" / "cache" / "feature_matrix.csv"
+        if fm_path.exists():
+            fm = pd.read_csv(fm_path, usecols=["season_year","player_name","pts","reb","ast","blk","fg3m"])
+            cur = fm["season_year"].max()
+            fm  = fm[fm["season_year"] == cur].copy()
+            fm["pra"] = fm["pts"] + fm["reb"] + fm["ast"]
+            for name, stat in stars:
+                last = name.split()[-1]
+                sub  = fm[fm["player_name"].str.contains(last, case=False, na=False)]
+                if sub.empty or stat not in sub.columns:
+                    continue
+                val  = round(float(sub[stat].mean()), 1)
+                lbl  = LABELS.get(stat, stat.upper())
+                ticks.append((last, f"{lbl} {val}", "u"))
+    except Exception:
+        pass
+    if not ticks:
+        ticks = [
+            ("SGA","PTS 31.2","h"),("Jokic","PRA 52.1","h"),
+            ("Doncic","PTS 27.3","u"),("Giannis","REB 10.8","h"),
+            ("Tatum","PTS 25.4","u"),("Curry","3PM 3.8","u"),
+            ("LeBron","PTS 18.6","h"),("Wemby","BLK 3.2","h"),
+            ("A.Davis","BLK 2.4","u"),("Durant","PTS 27.3","u"),
+        ]
+    return ticks
+
+try:
+    TICKS = _build_ticker(players_df)
+except Exception:
+    TICKS = [
+        ("SGA","PTS 31.2","h"),("Jokic","PRA 52.1","h"),
+        ("Doncic","PTS 27.3","u"),("Giannis","REB 10.8","h"),
+        ("Tatum","PTS 25.4","u"),("Curry","3PM 3.8","u"),
+        ("LeBron","PTS 18.6","h"),("Wemby","BLK 3.2","h"),
+    ]
 ti  = "".join(f'<span class="lb-tick">{n}&nbsp;<span class="{c}">{s}</span></span>' for n,s,c in TICKS)
 td  = ti * 2
 
@@ -311,12 +346,10 @@ st.markdown(f"""<div class="lb-nav">
 </div>""", unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-nba_tab, nfl_tab = st.tabs(["🏀  NBA Props", "🏈  NFL Props"])
+nba_tab, picks_tab, accuracy_tab, nfl_tab = st.tabs(["🏀  NBA Props", "⚡  Quick Picks", "📈  Accuracy", "🏈  NFL Props"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 with nba_tab:
-    st.markdown('<div class="lb-body">', unsafe_allow_html=True)
-
     # ── Slate (full width, horizontal) ────────────────────────────────────────
     if today_slate:
         st.markdown('<span class="slate-hdr">Today\'s Games</span>', unsafe_allow_html=True)
@@ -416,7 +449,6 @@ with nba_tab:
         c1, c2 = st.columns(2)
         with c1:
             if st.button("🔄 Sync Data", use_container_width=True,
-                         type="primary",
                          help="Re-fetch current season from NBA API"):
                 with st.spinner("Syncing..."):
                     ok = refresh_current_season()
@@ -426,7 +458,6 @@ with nba_tab:
                 else:  st.error("❌ Sync failed")
 
             if st.button("🏥 Injuries", use_container_width=True,
-                         type="primary",
                          help="Refresh ESPN injury report"):
                 with st.spinner("Fetching..."):
                     try:
@@ -439,7 +470,6 @@ with nba_tab:
 
         with c2:
             if st.button("📋 Lineups", use_container_width=True,
-                         type="primary",
                          help="Refresh starting lineups from ESPN"):
                 with st.spinner("Fetching..."):
                     try:
@@ -451,7 +481,6 @@ with nba_tab:
                         st.error(f"❌ {e}")
 
             if st.button("🤖 Retrain", use_container_width=True,
-                         type="primary",
                          help="Retrain all models (~15 min, runs in background)"):
                 try:
                     import subprocess
@@ -466,7 +495,6 @@ with nba_tab:
                     st.error(f"❌ {e}")
 
         if st.button("📊 Backtest (30d)", use_container_width=True,
-                     type="primary",
                      help="Check prediction accuracy vs actual results"):
             with st.spinner("Running backtest..."):
                 try:
@@ -563,33 +591,6 @@ with nba_tab:
             cnx = 100+65*math.cos(math.radians(180-ca))
             cny = 100-65*math.sin(math.radians(180-ca))
 
-            # Edge (model projection vs sportsbook line)
-            edge     = round(tr.predicted_value - custom_line, 1)
-            edge_pct = round(abs(edge) / max(custom_line, 0.5) * 100, 0)
-            if edge > 0:
-                edge_color="#4caf82"; edge_bg="rgba(76,175,130,0.1)"; edge_icon="▲"; edge_dir="OVER"
-            else:
-                edge_color="#e05a5a"; edge_bg="rgba(224,90,90,0.1)"; edge_icon="▼"; edge_dir="UNDER"
-            value_badge = ""
-            if edge_pct >= 15 and tr.confidence_label in ("High","Medium"):
-                vbc = "#4caf82" if edge>0 else "#e05a5a"
-                value_badge = (f'&nbsp;&middot;&nbsp;<span style="background:rgba(76,175,130,0.15);color:{vbc};'
-                               f'border:1px solid {vbc}44;border-radius:4px;padding:1px 6px;font-size:9px;'
-                               f'font-weight:700;letter-spacing:1px;text-transform:uppercase;vertical-align:middle;">'
-                               f'BEST VALUE</span>')
-
-            # Trend (L5 avg vs L10 avg — is player trending up or down?)
-            if tr.recent_avg_10 > 0:
-                trend_ratio = tr.recent_avg_5 / tr.recent_avg_10
-            else:
-                trend_ratio = 1.0
-            if trend_ratio >= 1.10:
-                trend_icon="#4caf82"; trend_txt="▲ HOT"
-            elif trend_ratio <= 0.90:
-                trend_icon="#e05a5a"; trend_txt="▼ COLD"
-            else:
-                trend_icon="#3a3a50"; trend_txt="→ STEADY"
-
             # Page tint
             try:
                 r,gv,bv=int(pc[1:3],16),int(pc[3:5],16),int(pc[5:7],16)
@@ -673,7 +674,7 @@ with nba_tab:
             .cd{{width:5px;height:5px;border-radius:50%;background:{cco};}}
             .body{{padding:18px 20px 16px;}}
             /* Hero number row */
-            .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #0d0d15;}}
+            .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid #0d0d15;}}
             .proj{{flex:0 0 auto;}}
             .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{pc};
                     text-shadow:0 0 60px {pc}44;letter-spacing:0.01em;}}
@@ -687,12 +688,6 @@ with nba_tab:
             .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
             .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
             .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{cco};}}
-            /* Edge + trend row */
-            .edge-row{{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;}}
-            .edge-badge{{display:inline-flex;align-items:center;gap:4px;background:{edge_bg};color:{edge_color};
-                          border:1px solid {edge_color}44;border-radius:6px;padding:3px 9px;
-                          font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;}}
-            .trend-badge{{font-size:10px;font-weight:700;letter-spacing:1px;color:{trend_icon};}}
             /* Over/under */
             .ou{{margin-bottom:16px;}}
             .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
@@ -714,7 +709,7 @@ with nba_tab:
                     <div class="hl">
                         <img class="av" src="{hs}" onerror="this.style.display='none'"/>
                         <div>
-                            <div class="nm">{result.player_name}{value_badge}</div>
+                            <div class="nm">{result.player_name}</div>
                             <div class="sb">{loc}&nbsp;<span class="opp">{sel_opp}</span>&nbsp;&middot;&nbsp;{rest_days}d rest&nbsp;&middot;&nbsp;{location}{inj}{lu_badge}</div>
                         </div>
                     </div>
@@ -748,10 +743,6 @@ with nba_tab:
                             <div class="sc"><div class="sv">{custom_line}</div><div class="sl">Line</div></div>
                         </div>
                     </div>
-                    <div class="edge-row">
-                        <div class="edge-badge">{edge_icon}&nbsp;{edge_dir} EDGE&nbsp;{'+' if edge>0 else ''}{edge:.1f}&nbsp;({int(edge_pct)}%)</div>
-                        <div class="trend-badge">{trend_txt}</div>
-                    </div>
                     <div class="ou">
                         <div class="ot">Over / Under {custom_line} {target_info["short"]}</div>
                         <div class="or">
@@ -772,464 +763,271 @@ with nba_tab:
 
             components.html(html, height=630, scrolling=False)
 
-            with st.expander("📊  All props — this matchup", expanded=False):
-                rows=[]
-                for t,ta in result.targets.items():
-                    inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
-                    e_val = round(ta.predicted_value - ta.threshold, 1)
-                    e_pct = round(abs(e_val) / max(ta.threshold, 0.5) * 100, 0)
-                    e_dir = f"▲ +{e_val}" if e_val > 0 else f"▼ {e_val}"
-                    rows.append({
-                        "Stat":       inf["label"],
-                        "Group":      inf["group"],
-                        "Projected":  ta.predicted_value,
-                        "Line":       ta.threshold,
-                        "Edge":       e_dir,
-                        "Edge %":     f"{int(e_pct)}%",
-                        "Over %":     f"{ta.over_prob*100:.1f}%",
-                        "Confidence": ta.confidence_label,
-                        "MAE":        ta.model_mae,
-                    })
-                if rows:
-                    df_props = pd.DataFrame(rows)
-                    st.dataframe(df_props, use_container_width=True, hide_index=True,
-                        column_config={
-                            "Projected": st.column_config.NumberColumn("Projected", format="%.1f"),
-                            "MAE":       st.column_config.NumberColumn("MAE", format="%.3f"),
-                        })
+            # ── Log this prediction ───────────────────────────────────────────────
+            log_col, share_col = st.columns(2)
+            with log_col:
+                if st.button("📝 Log This Pick", use_container_width=True,
+                             help="Save prediction to track accuracy"):
+                    log_prediction(
+                        player_name=result.player_name,
+                        player_id=int(p_row["id"]),
+                        target=sel_target,
+                        predicted=float(tr.predicted_value),
+                        custom_line=float(custom_line),
+                        over_prob=float(op),
+                        opponent=sel_opp,
+                        is_home=(location=="Home"),
+                    )
+                    st.success("✅ Pick logged! Check Accuracy tab to track results.")
+            with share_col:
+                share_text = (
+                    f"🏀 LineBreaker Prediction\n"
+                    f"{result.player_name} — {target_info['label']}\n"
+                    f"Projected: {tr.predicted_value} | Line: {custom_line}\n"
+                    f"{'OVER' if op>50 else 'UNDER'} {custom_line} ({op:.1f}%)\n"
+                    f"breaktheline.streamlit.app"
+                )
+                st.code(share_text, language=None)
 
-    st.markdown('</div>', unsafe_allow_html=True)
+            with st.expander("📊  All props — this matchup", expanded=False):
+                    rows=[]
+                    for t,ta in result.targets.items():
+                        inf=TARGET_DISPLAY.get(t,{"label":t,"short":t,"group":"-"})
+                        rows.append({"Stat":inf["label"],"Group":inf["group"],"Projected":ta.predicted_value,
+                                     "Line":ta.threshold,"Over %":f"{ta.over_prob*100:.1f}%",
+                                     "Confidence":ta.confidence_label,"MAE":ta.model_mae})
+                    if rows:
+                        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
+                            column_config={"Projected":st.column_config.NumberColumn("Projected",format="%.1f"),
+                                           "MAE":st.column_config.NumberColumn("MAE",format="%.3f")})
+
+# ══════════════════════════════════════════════════════════════════════════════
+# QUICK PICKS TAB
+# ══════════════════════════════════════════════════════════════════════════════
+with picks_tab:
+    st.markdown("""
+    <div style="margin-bottom:1.5rem;">
+        <div style="font-size:1.4rem;font-weight:700;color:#f0ede8;margin-bottom:0.3rem;">Today's Best Picks</div>
+        <div style="font-size:0.72rem;color:#2a2a3a;">Highest-edge plays based on model vs default line. Ranked by confidence edge.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        qp_conf = st.selectbox("Confidence", ["All","High","Medium"], key="qp_conf")
+    with col_f2:
+        qp_dir = st.selectbox("Direction", ["All","OVER","UNDER"], key="qp_dir")
+    with col_f3:
+        qp_n = st.slider("Top N", 5, 25, 10, key="qp_n")
+
+    if st.button("⚡ Generate Quick Picks", use_container_width=True, type="primary"):
+        with st.spinner("Scanning today's slate… this takes 1–2 minutes"):
+            try:
+                from models.quick_picks import generate_quick_picks
+                min_conf = None if qp_conf == "All" else qp_conf
+                qp_result = generate_quick_picks(top_n=qp_n, min_confidence=min_conf)
+                st.session_state["qp_result"] = qp_result
+                st.session_state["qp_dir_filter"] = qp_dir
+            except Exception as e:
+                st.error(f"Error generating picks: {e}")
+
+    # Display from session state (survives tab switches)
+    qp_df = st.session_state.get("qp_result", pd.DataFrame())
+    qp_dir_filter = st.session_state.get("qp_dir_filter", "All")
+
+    if not qp_df.empty:
+        try:
+            if qp_dir_filter != "All":
+                qp_df = qp_df[qp_df["direction"] == qp_dir_filter]
+            if qp_df.empty:
+                st.info(f"No {qp_dir_filter} picks. Try removing the direction filter.")
+
+            for _, row in qp_df.iterrows():
+                arrow   = "⬆" if row["direction"] == "OVER" else "⬇"
+                pc      = TEAM_COLORS.get(row["team"], "#f0672a")
+                conf_c  = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
+                edge_w  = min(100, int(row["edge"] * 20))
+
+                st.markdown(f"""
+                <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;
+                            padding:1rem 1.2rem;margin-bottom:0.6rem;
+                            border-left:3px solid {pc};">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem;">
+                        <div>
+                            <span style="font-size:1rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
+                            <span style="font-size:0.7rem;color:#2a2a3a;margin-left:0.5rem;">{row["team"]} vs {row["opponent"]}</span>
+                        </div>
+                        <span style="background:rgba(76,175,130,0.1);color:{conf_c};border:1px solid {conf_c}44;
+                                     border-radius:20px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:1px;">
+                            {row["confidence"].upper()}
+                        </span>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:1rem;">
+                        <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:{pc};line-height:1;">
+                            {arrow} {row["short"]}
+                        </div>
+                        <div>
+                            <div style="font-size:0.7rem;color:#2a2a3a;">Proj <strong style="color:#e8e6e0;">{row["predicted"]}</strong>
+                                &nbsp;vs line <strong style="color:#e8e6e0;">{row["line"]}</strong>
+                                &nbsp;· {row["direction"]} {row["over_prob"]}%
+                            </div>
+                            <div style="margin-top:0.3rem;display:flex;align-items:center;gap:0.5rem;">
+                                <div style="font-size:9px;color:#2a2a3a;text-transform:uppercase;letter-spacing:1px;">Edge</div>
+                                <div style="flex:1;height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;min-width:80px;">
+                                    <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
+                                </div>
+                                <div style="font-size:10px;font-weight:600;color:{pc};">{row["edge"]:.1f}x</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        except Exception as e:
+            import traceback
+            st.error(f"Quick picks error: {e}")
+            with st.expander("Details"):
+                st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACCURACY TAB
+# ══════════════════════════════════════════════════════════════════════════════
+with accuracy_tab:
+    # Resolve any pending predictions
+    try:
+        resolved = resolve_predictions()
+        if resolved > 0:
+            st.success(f"✅ Resolved {resolved} predictions with actual results!")
+    except Exception:
+        pass
+
+    stats = get_accuracy_stats()
+
+    if stats["total"] == 0:
+        st.markdown("""
+        <div style="text-align:center;padding:3rem;color:#2a2a3a;">
+            <div style="font-size:3rem;margin-bottom:1rem;">📈</div>
+            <div style="font-size:1rem;font-weight:600;color:#3a3a4a;">No predictions logged yet</div>
+            <div style="font-size:0.72rem;margin-top:0.5rem;">
+                Run a prediction and click "Log This Pick" to start tracking accuracy.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Overall stats
+        acc     = stats["accuracy"]
+        acc_c   = "#4caf82" if acc >= 55 else "#d4b44a" if acc >= 50 else "#e05a5a"
+        r_acc   = stats["recent_30d"]["accuracy"]
+        r_acc_c = "#4caf82" if r_acc >= 55 else "#d4b44a" if r_acc >= 50 else "#e05a5a"
+
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.8rem;margin-bottom:1.5rem;">
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{acc_c};line-height:1;">{acc:.1f}%</div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Overall</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{r_acc_c};line-height:1;">{r_acc:.1f}%</div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Last 30 Days</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:#f0672a;line-height:1;">{stats["total"]}</div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Total Picks</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:#4caf82;line-height:1;">{stats["streak"]}</div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Win Streak</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # By stat accuracy
+        if stats["by_target"]:
+            st.markdown('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Accuracy by Stat</div>', unsafe_allow_html=True)
+            for tgt, tdata in sorted(stats["by_target"].items(), key=lambda x: -x[1]["accuracy"]):
+                tinfo = TARGET_DISPLAY.get(tgt, {"short": tgt})
+                tacc  = tdata["accuracy"]
+                tc    = "#4caf82" if tacc >= 55 else "#d4b44a" if tacc >= 50 else "#e05a5a"
+                st.markdown(f"""
+                <div style="display:flex;align-items:center;gap:0.8rem;margin-bottom:0.4rem;">
+                    <div style="font-size:0.72rem;color:#3a3a4a;min-width:60px;">{tinfo.get("short","?")}</div>
+                    <div style="flex:1;height:4px;background:#1a1a28;border-radius:2px;overflow:hidden;">
+                        <div style="height:100%;width:{tacc}%;background:{tc};border-radius:2px;"></div>
+                    </div>
+                    <div style="font-size:0.72rem;font-weight:600;color:{tc};min-width:40px;">{tacc:.0f}%</div>
+                    <div style="font-size:0.62rem;color:#2a2a3a;">{tdata["total"]} picks</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Recent picks log
+        st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Recent Picks</div>', unsafe_allow_html=True)
+        recent = get_recent_predictions(15)
+        for p in recent:
+            if p.get("resolved") and p.get("correct") is not None:
+                icon   = "✅" if p["correct"] else "❌"
+                actual = f"Actual: {p['actual']}" if p["actual"] is not None else "No result"
+            else:
+                icon   = "⏳"
+                actual = "Pending"
+            tinfo = TARGET_DISPLAY.get(p["target"], {"short": p["target"]})
+            st.markdown(f"""
+            <div style="display:flex;align-items:center;justify-content:space-between;
+                        padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.72rem;">
+                <div>{icon} <strong style="color:#e8e6e0;">{p["player_name"]}</strong>
+                    <span style="color:#2a2a3a;margin-left:4px;">{tinfo.get("short","?")} {p["pick"]} {p["custom_line"]}</span>
+                </div>
+                <div style="color:#2a2a3a;">{actual} · {p.get("game_date","")}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 with nfl_tab:
-    st.markdown('<div class="lb-body">', unsafe_allow_html=True)
-
-    # ── NFL Slate ─────────────────────────────────────────────────────────────
-    if nfl_slate:
-        st.markdown('<span class="slate-hdr">Today\'s NFL Games</span>', unsafe_allow_html=True)
-        ng   = min(len(nfl_slate), 8)
-        ncols = st.columns(ng)
-        cur_nfl = st.session_state.get("nfl_slate_opp")
-        for i, g in enumerate(nfl_slate[:ng]):
-            ha, aa = g["home_abbr"], g["away_abbr"]
-            hc = NFL_TEAM_COLORS.get(ha, "#888"); ac = NFL_TEAM_COLORS.get(aa, "#888")
-            gst = g["status"]
-            if gst == "live":
-                hp, ap = g.get("home_pts",""), g.get("away_pts","")
-                ts, tc = (f"LIVE {ap}-{hp}" if hp or ap else "LIVE"), "#e05a5a"
-            elif gst == "final":
-                hp, ap = g.get("home_pts",""), g.get("away_pts","")
-                ts, tc = f"Final {ap}-{hp}", "#3a3a50"
-            else:
-                ts, tc = g.get("game_time","TBD")[:5] if g.get("game_time") else "TBD", "#3a3a50"
-            sel_n = (cur_nfl == ha)
-            try: r2,g2b,b2=int(hc[1:3],16),int(hc[3:5],16),int(hc[5:7],16); bgn=f"rgba({r2},{g2b},{b2},0.08)" if sel_n else "#0d0d15"
-            except: bgn="#0d0d15"
-            bdrn = hc if sel_n else "#1a1a28"
-            fl = "<link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@500;600&display=swap' rel='stylesheet'>"
-            csn = (f"*{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;}}"
-                   f".c{{border:2px solid {bdrn};border-radius:8px;padding:7px 8px;background:{bgn};}}"
-                   f".t{{font-size:9px;font-weight:600;color:{tc};letter-spacing:1px;text-transform:uppercase;margin-bottom:3px;}}"
-                   f".r{{display:flex;align-items:center;justify-content:center;gap:5px;}}"
-                   f".a{{font-family:'Bebas Neue',sans-serif;font-size:16px;line-height:1;}}"
-                   f".s{{font-size:8px;color:#2a2a3a;text-align:center;margin-top:1px;}}"
-                   f".at{{font-size:9px;color:#1e1e2e;font-weight:700;}}")
-            bdn = (f"<div class='c'><div class='t'>{ts}</div><div class='r'>"
-                   f"<div><div class='a' style='color:{ac}'>{aa}</div></div>"
-                   f"<div class='at'>@</div>"
-                   f"<div><div class='a' style='color:{hc}'>{ha}</div></div>"
-                   f"</div></div>")
-            with ncols[i]:
-                components.html(f"<!DOCTYPE html><html><head>{fl}<style>{csn}</style></head><body>{bdn}</body></html>",
-                               height=60, scrolling=False)
-                if st.button(f"{aa}@{ha}", key=f"nfl_sg_{i}", use_container_width=True, help=f"Set opponent: {ha}"):
-                    st.session_state["nfl_slate_opp"] = ha
-                    st.rerun()
-        st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
-    else:
-        # Offseason banner
-        st.markdown(
-            f'<div style="background:#060e06;border:1px solid #143214;border-radius:10px;padding:10px 16px;'
-            f'display:inline-flex;align-items:center;gap:8px;margin-bottom:1rem;">'
-            f'<div style="width:6px;height:6px;border-radius:50%;background:#4caf82;"></div>'
-            f'<span style="font-size:11px;font-weight:600;letter-spacing:2px;color:#4caf82;text-transform:uppercase;">'
-            f'{NFL_SEASON} NFL Season Data &nbsp;&middot;&nbsp; Next season starts Sept 2026</span></div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Two columns ───────────────────────────────────────────────────────────
-    nfl_left, nfl_right = st.columns([1, 2], gap="large")
-
-    with nfl_left:
-        st.markdown('<div class="ctrl-panel">', unsafe_allow_html=True)
-
-        nfl_search = st.text_input("🔍  Search player", placeholder="Name...",
-                                   label_visibility="visible", key="nfl_search")
-
-        with st.expander("Filter", expanded=False):
-            nfl_pos_opts = ["All positions", "QB", "RB", "WR", "TE"]
-            nfl_f_pos = st.selectbox("Position", nfl_pos_opts, key="nfl_pos")
-            nfl_team_opts = (["All teams"] + sorted(nfl_teams_df["team_abbreviation"].tolist())
-                             if not nfl_teams_df.empty else ["All teams"])
-            nfl_f_team = st.selectbox("Team", nfl_team_opts, key="nfl_team")
-
-        # Filter players
-        nfl_filt = nfl_players_df.copy() if not nfl_players_df.empty else pd.DataFrame()
-        if not nfl_filt.empty:
-            if nfl_search:
-                nfl_filt = nfl_filt[nfl_filt["full_name"].str.contains(nfl_search, case=False, na=False)]
-            if nfl_f_pos != "All positions":
-                nfl_filt = nfl_filt[nfl_filt["position"] == nfl_f_pos]
-            if nfl_f_team != "All teams" and "team_abbreviation" in nfl_filt.columns:
-                nfl_filt = nfl_filt[nfl_filt["team_abbreviation"] == nfl_f_team]
-
-        if nfl_filt.empty:
-            nfl_player_opts = []
-            st.warning("No NFL player data. Click 'Load NFL Data' below.")
-        else:
-            nfl_player_opts = sorted(nfl_filt["full_name"].tolist())
-
-        st.markdown('<span class="ctrl-label">Player</span>', unsafe_allow_html=True)
-        nfl_sel_player = st.selectbox("NFL Player", options=nfl_player_opts or ["—"],
-                                      index=0, label_visibility="collapsed", key="nfl_player")
-
-        st.markdown('<span class="ctrl-label">Opponent</span>', unsafe_allow_html=True)
-        nfl_opp_opts = sorted(nfl_teams_df["team_abbreviation"].tolist()) if not nfl_teams_df.empty else []
-        nfl_sl_opp   = st.session_state.get("nfl_slate_opp")
-        nfl_opp_idx  = nfl_opp_opts.index(nfl_sl_opp) if nfl_sl_opp and nfl_sl_opp in nfl_opp_opts else 0
-        nfl_sel_opp  = st.selectbox("NFL Opponent", options=nfl_opp_opts or ["—"],
-                                    index=nfl_opp_idx, label_visibility="collapsed", key="nfl_opp")
-
-        nfl_lc, nfl_rc = st.columns(2)
-        with nfl_lc:
-            st.markdown('<span class="ctrl-label">Location</span>', unsafe_allow_html=True)
-            nfl_location = st.radio("nfl_loc", ["Home","Away"], horizontal=True,
-                                    label_visibility="collapsed", key="nfl_location")
-        with nfl_rc:
-            st.markdown('<span class="ctrl-label">Season</span>', unsafe_allow_html=True)
-            st.markdown(f'<div style="font-size:1.1rem;font-weight:700;color:#4caf82;padding-top:6px;">{NFL_SEASON}</div>',
-                        unsafe_allow_html=True)
-
-        # Stat options — filtered by position
-        nfl_pos_sel = "All"
-        if not nfl_filt.empty and nfl_sel_player in nfl_filt["full_name"].values:
-            p_pos = nfl_filt[nfl_filt["full_name"]==nfl_sel_player]["position"].values
-            nfl_pos_sel = p_pos[0] if len(p_pos) else "All"
-
-        nfl_stat_opts, nfl_stat_map = [], {}
-        for grp in NFL_TARGET_GROUPS:
-            for tgt, info in NFL_TARGET_DISPLAY.items():
-                if info["group"] == grp:
-                    pos_ok = (nfl_pos_sel == "All" or nfl_pos_sel in info["pos"])
-                    if pos_ok:
-                        d = f"{info['label']} ({info['short']})"
-                        nfl_stat_opts.append(d)
-                        nfl_stat_map[d] = tgt
-        if not nfl_stat_opts:
-            nfl_stat_opts = [f"{v['label']} ({v['short']})" for v in NFL_TARGET_DISPLAY.values()]
-            nfl_stat_map  = {f"{v['label']} ({v['short']})": k for k,v in NFL_TARGET_DISPLAY.items()}
-
-        st.markdown('<span class="ctrl-label">Stat</span>', unsafe_allow_html=True)
-        nfl_sel_stat_d = st.selectbox("NFL Stat", options=nfl_stat_opts,
-                                      label_visibility="collapsed", key="nfl_stat")
-        nfl_sel_target = nfl_stat_map.get(nfl_sel_stat_d, "pass_yds")
-        nfl_tinfo      = NFL_TARGET_DISPLAY.get(nfl_sel_target, {"label": nfl_sel_target, "short": nfl_sel_target})
-
-        st.markdown('<span class="ctrl-label">Over/Under Line</span>', unsafe_allow_html=True)
-        nfl_default_line = NFL_THRESHOLDS.get(nfl_sel_target, 50)
-        nfl_line_max = {"pass_yds":500,"pass_att":60,"completions":45,"pass_tds":6,
-                        "rush_yds":250,"rush_att":35,"rec_yds":200,"receptions":15,"targets":18}.get(nfl_sel_target, 150)
-        nfl_custom_line = st.slider("nfl_line", 0, nfl_line_max, value=int(nfl_default_line),
-                                    label_visibility="collapsed", key="nfl_line_slider")
-
-        nfl_run_btn = st.button("▶  Run Prediction", use_container_width=True,
-                                type="primary", key="nfl_run")
-
-        # ── Data management ────────────────────────────────────────────────────
-        st.divider()
-        st.caption("DATA")
-        nfl_c1, nfl_c2 = st.columns(2)
-        with nfl_c1:
-            if st.button("📋 Load NFL Data", use_container_width=True, key="nfl_load",
-                         type="primary",
-                         help="Fetch all NFL team rosters from ESPN"):
-                with st.spinner("Loading NFL rosters..."):
-                    try:
-                        fetch_all_nfl_players(force_refresh=True)
-                        load_nfl_players.clear()
-                        load_nfl_teams.clear()
-                        st.success("✅ NFL players loaded!")
-                        st.rerun()
-                    except Exception as ex:
-                        st.error(f"❌ {ex}")
-        with nfl_c2:
-            if st.button("🔄 Refresh", use_container_width=True, key="nfl_refresh",
-                         type="primary",
-                         help="Clear NFL cache and reload"):
-                load_nfl_players.clear()
-                load_nfl_teams.clear()
-                load_nfl_slate.clear()
-                st.rerun()
-
-        try:
-            import json as _jj
-            nfl_mp = ROOT / "data" / "cache" / "nfl_all_players.csv"
-            if nfl_mp.exists():
-                _np = pd.read_csv(nfl_mp)
-                st.markdown(
-                    f'<div style="font-size:0.52rem;color:#2a2a3a;margin-top:0.5rem;">'
-                    f'NFL roster: {len(_np)} players &nbsp;·&nbsp; {NFL_SEASON} season</div>',
-                    unsafe_allow_html=True)
-        except: pass
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # ── NFL Output ─────────────────────────────────────────────────────────────
-    with nfl_right:
-        if not nfl_run_btn or not nfl_player_opts or nfl_sel_player == "—":
-            nfl_ph = f"""<!DOCTYPE html><html><head>
-            <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@600&display=swap' rel='stylesheet'>
-            <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;}}
-            .w{{position:relative;overflow:hidden;border-radius:16px;background:#060e06;border:1px solid #143214;
-                 min-height:480px;display:flex;align-items:center;justify-content:center;}}
-            .bg{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
-            .i{{position:relative;z-index:1;text-align:center;padding:2rem;}}
-            .lg{{font-family:'Bebas Neue',sans-serif;font-size:5rem;color:#4caf82;opacity:0.07;line-height:1;margin-bottom:1rem;}}
-            .t{{font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#1a3a28;}}
-            .s{{font-size:10px;color:#111118;letter-spacing:1px;margin-top:6px;}}
-            </style></head><body>
-            <div class='w'><div class='bg'>{_svg_field()}</div>
-            <div class='i'><div class='lg'>NFL Props</div>
-            <div class='t'>Select a player &amp; run prediction</div>
-            <div class='s'>Beat the Line. Break the Line.</div>
-            </div></div></body></html>"""
-            components.html(nfl_ph, height=480, scrolling=False)
-
-        else:
-            # Find player row
-            nfl_p_row = nfl_filt[nfl_filt["full_name"] == nfl_sel_player].iloc[0]
-            nfl_pid   = str(nfl_p_row["player_id"])
-            nfl_pt    = str(nfl_p_row.get("team_abbreviation","")).upper()
-            nfl_pos   = str(nfl_p_row.get("position","")).upper()
-            nfl_pc    = NFL_TEAM_COLORS.get(nfl_pt, "#4caf82")
-            nfl_oc    = NFL_TEAM_COLORS.get(nfl_sel_opp, "#888888")
-            nfl_loc   = "vs." if nfl_location=="Home" else "@"
-            nfl_hs    = get_nfl_player_headshot(nfl_pid, nfl_players_df)
-
-            with st.spinner(f"Predicting {nfl_sel_player}..."):
-                nfl_pred = predict_nfl_prop(
-                    player_id=nfl_pid,
-                    target=nfl_sel_target,
-                    custom_line=nfl_custom_line,
-                    is_home=(nfl_location=="Home"),
-                    season=NFL_SEASON,
-                )
-
-            nfl_pv  = nfl_pred["predicted_value"]
-            nfl_op  = round(nfl_pred["over_prob"] * 100, 1)
-            nfl_up  = round(100 - nfl_op, 1)
-            nfl_avg5  = nfl_pred["recent_avg_5"]
-            nfl_avg10 = nfl_pred["recent_avg_10"]
-            nfl_conf  = nfl_pred["confidence"]
-            nfl_ngames= nfl_pred["n_games"]
-            nfl_rg    = nfl_pred["recent_games"]
-
-            # Edge
-            nfl_edge     = round(nfl_pv - nfl_custom_line, 1)
-            nfl_edge_pct = round(abs(nfl_edge) / max(nfl_custom_line, 0.5) * 100, 0)
-            if nfl_edge > 0:
-                nfl_ec="#4caf82"; nfl_eb="rgba(76,175,130,0.1)"; nfl_ei="▲"; nfl_ed="OVER"
-            else:
-                nfl_ec="#e05a5a"; nfl_eb="rgba(224,90,90,0.1)"; nfl_ei="▼"; nfl_ed="UNDER"
-            nfl_vbadge = ""
-            if nfl_edge_pct >= 15 and nfl_conf in ("High","Medium"):
-                vbc2 = "#4caf82" if nfl_edge>0 else "#e05a5a"
-                nfl_vbadge = (f'&nbsp;&middot;&nbsp;<span style="background:rgba(76,175,130,0.15);color:{vbc2};'
-                              f'border:1px solid {vbc2}44;border-radius:4px;padding:1px 6px;font-size:9px;'
-                              f'font-weight:700;letter-spacing:1px;text-transform:uppercase;vertical-align:middle;">'
-                              f'BEST VALUE</span>')
-
-            # Trend
-            if nfl_avg10 > 0:
-                nfl_trend_r = nfl_avg5 / nfl_avg10
-            else:
-                nfl_trend_r = 1.0
-            if nfl_trend_r >= 1.10: nfl_tri="#4caf82"; nfl_trt="▲ HOT"
-            elif nfl_trend_r <= 0.90: nfl_tri="#e05a5a"; nfl_trt="▼ COLD"
-            else: nfl_tri="#3a3a50"; nfl_trt="→ STEADY"
-
-            # Confidence colors
-            nfl_cc = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}
-            nfl_cb = {"High":"rgba(76,175,130,0.12)","Medium":"rgba(212,180,74,0.12)","Low":"rgba(224,90,90,0.12)"}
-            nfl_cbo= {"High":"rgba(76,175,130,0.3)","Medium":"rgba(212,180,74,0.3)","Low":"rgba(224,90,90,0.3)"}
-            nfl_cco= nfl_cc.get(nfl_conf, "#4caf82")
-            nfl_ca = {"High":150,"Medium":90,"Low":30}.get(nfl_conf, 90)
-            nfl_cnx= 100 + 65*math.cos(math.radians(180-nfl_ca))
-            nfl_cny= 100 - 65*math.sin(math.radians(180-nfl_ca))
-
-            # Chart
-            nfl_W,nfl_H,nfl_PL,nfl_PR,nfl_PT,nfl_PB = 600,160,10,55,20,32
-            nfl_chart_block = ""
-            if nfl_rg:
-                nfl_cv   = nfl_rg
-                nfl_vld  = [v for v in nfl_cv if v==v and v is not None]
-                nfl_mx   = max(nfl_vld)*1.2 if nfl_vld else 1
-                nfl_mn   = max(0, min(nfl_vld)*0.7) if nfl_vld else 0
-                nfl_rng  = nfl_mx - nfl_mn if nfl_mx != nfl_mn else 1
-                nfl_av_v = sum(nfl_vld)/len(nfl_vld) if nfl_vld else 0
-                nfl_n    = len(nfl_cv)
-                def nyx(v): return nfl_PT+(1-(v-nfl_mn)/nfl_rng)*(nfl_H-nfl_PT-nfl_PB)
-                def nxx(i): return nfl_PL+i*(nfl_W-nfl_PL-nfl_PR)/max(nfl_n-1,1)
-                nfl_pts = " ".join(f"{nxx(i):.1f},{nyx(v):.1f}" for i,v in enumerate(nfl_cv) if v==v)
-                nfl_fx,nfl_lx,nfl_by2 = nxx(0),nxx(nfl_n-1),nfl_H-nfl_PB
-                nfl_ap = (f"M {nfl_fx:.1f},{nfl_by2} "
-                          + " ".join(f"L {nxx(i):.1f},{nyx(v):.1f}" for i,v in enumerate(nfl_cv) if v==v)
-                          + f" L {nfl_lx:.1f},{nfl_by2} Z")
-                nfl_dots=""
-                for i,v in enumerate(nfl_cv):
-                    if v!=v or v is None: continue
-                    cx3,cy3=nxx(i),nyx(v); ab3=v>=nfl_custom_line
-                    dc3=nfl_pc if ab3 else "#1e2535"
-                    nfl_dots+=f'<circle cx="{cx3:.1f}" cy="{cy3:.1f}" r="4" fill="{dc3}" stroke="#080810" stroke-width="1.5"/>'
-                    ly5=cy3-10 if cy3>nfl_PT+15 else cy3+17
-                    fc3="#c8c6c0" if ab3 else "#2a3040"
-                    nfl_dots+=f'<text x="{cx3:.1f}" y="{ly5:.1f}" text-anchor="middle" font-size="10" font-weight="600" fill="{fc3}" font-family="Inter,sans-serif">{int(v)}</text>'
-                    nfl_dots+=f'<text x="{cx3:.1f}" y="{nfl_H-nfl_PB+14}" text-anchor="middle" font-size="9" fill="#252535" font-family="Inter,sans-serif">Gm {i+1}</text>'
-                nfl_ay2=nyx(nfl_av_v); nfl_ly4=nyx(nfl_custom_line)
-                nfl_rl =f'<line x1="{nfl_PL}" y1="{nfl_ay2:.1f}" x2="{nfl_W-nfl_PR}" y2="{nfl_ay2:.1f}" stroke="#1e1e2e" stroke-dasharray="3,4" stroke-width="1"/>'
-                nfl_rl+=f'<text x="{nfl_W-nfl_PR+4}" y="{nfl_ay2+4:.1f}" font-size="9" fill="#252535" font-family="Inter,sans-serif">avg {nfl_av_v:.0f}</text>'
-                if nfl_PT<=nfl_ly4<=nfl_H-nfl_PB:
-                    nfl_rl+=f'<line x1="{nfl_PL}" y1="{nfl_ly4:.1f}" x2="{nfl_W-nfl_PR}" y2="{nfl_ly4:.1f}" stroke="{nfl_pc}" stroke-dasharray="4,3" stroke-width="1.5" opacity="0.6"/>'
-                    nfl_rl+=f'<text x="{nfl_W-nfl_PR+4}" y="{nfl_ly4+4:.1f}" font-size="9" fill="{nfl_pc}" font-family="Inter,sans-serif" opacity="0.9">{nfl_custom_line}</text>'
-                nfl_svg=(f'<svg width="100%" viewBox="0 0 {nfl_W} {nfl_H}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;">'
-                         f'<defs><linearGradient id="nag" x1="0" y1="0" x2="0" y2="1">'
-                         f'<stop offset="0%" stop-color="{nfl_pc}" stop-opacity="0.2"/>'
-                         f'<stop offset="100%" stop-color="{nfl_pc}" stop-opacity="0"/>'
-                         f'</linearGradient></defs>'
-                         f'{nfl_rl}<path d="{nfl_ap}" fill="url(#nag)"/>'
-                         f'<polyline points="{nfl_pts}" fill="none" stroke="{nfl_pc}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>'
-                         f'{nfl_dots}</svg>')
-                nfl_chart_block=f'<div class="chart-wrap"><div class="ct">Last {nfl_n} games &mdash; {nfl_tinfo["label"]}</div>{nfl_svg}</div>'
-
-            nfl_html_out = f"""<!DOCTYPE html><html><head>
-            <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-            <style>
-            *{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;color:#e8e6e0;}}
-            .card{{background:#060e06;border-radius:16px;overflow:hidden;border:1px solid #0d1f0d;}}
-            .top{{height:3px;background:linear-gradient(90deg,{nfl_pc} 0%,transparent 100%);}}
-            .hdr{{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 14px;border-bottom:1px solid #0d1f0d;gap:12px;}}
-            .hl{{display:flex;align-items:center;gap:12px;flex:1;min-width:0;}}
-            .av{{width:52px;height:52px;border-radius:50%;border:2px solid {nfl_pc};object-fit:cover;object-position:top;background:#0d1f0d;flex-shrink:0;}}
-            .nm{{font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#f0ede8;line-height:1.1;}}
-            .sb{{font-size:11px;color:#1a3a28;margin-top:3px;}} .opp{{color:{nfl_oc};font-weight:600;}}
-            .pos{{background:rgba(76,175,130,0.08);color:#4caf82;border:1px solid rgba(76,175,130,0.2);
-                   border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700;letter-spacing:1px;vertical-align:middle;}}
-            .cf{{display:inline-flex;align-items:center;gap:4px;border-radius:20px;padding:3px 10px;
-                  font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;flex-shrink:0;
-                  background:{nfl_cb.get(nfl_conf,"rgba(76,175,130,0.12)")};
-                  color:{nfl_cco};border:1px solid {nfl_cbo.get(nfl_conf,"rgba(76,175,130,0.3)")};}}
-            .cd{{width:5px;height:5px;border-radius:50%;background:{nfl_cco};}}
-            .body{{padding:18px 20px 16px;}}
-            .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid #0d1f0d;}}
-            .proj{{flex:0 0 auto;}}
-            .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{nfl_pc};
-                    text-shadow:0 0 60px {nfl_pc}44;letter-spacing:0.01em;}}
-            .plbl{{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#1a3a28;margin-top:6px;}}
-            .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
-            .sc{{background:#0d1f0d;border-radius:10px;padding:10px 12px;}}
-            .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
-            .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a3a28;}}
-            .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
-            .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a3a28;}}
-            .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{nfl_cco};}}
-            .edge-row{{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap;}}
-            .edge-badge{{display:inline-flex;align-items:center;gap:4px;background:{nfl_eb};color:{nfl_ec};
-                          border:1px solid {nfl_ec}44;border-radius:6px;padding:3px 9px;
-                          font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;}}
-            .trend-badge{{font-size:10px;font-weight:700;letter-spacing:1px;color:{nfl_tri};}}
-            .ou{{margin-bottom:16px;}}
-            .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a3a28;margin-bottom:10px;}}
-            .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
-            .or:last-child{{margin-bottom:0;}}
-            .ol{{font-size:11px;font-weight:500;color:#1a3a28;min-width:72px;}}
-            .ob{{flex:1;height:5px;background:#0d1f0d;border-radius:3px;overflow:hidden;}}
-            .fo{{height:100%;background:{nfl_pc};border-radius:3px;width:{nfl_op:.1f}%;}}
-            .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{nfl_up:.1f}%;}}
-            .op2{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;min-width:48px;text-align:right;line-height:1;}}
-            .chart-wrap{{padding-top:14px;border-top:1px solid #0d1f0d;}}
-            .ct{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a3a28;margin-bottom:10px;}}
-            .meta{{font-size:9px;color:#0d1f0d;margin-top:8px;padding-top:10px;border-top:1px solid #060e06;}}
-            </style></head><body>
-            <div class="card">
-                <div class="top"></div>
-                <div class="hdr">
-                    <div class="hl">
-                        {"<img class='av' src='" + nfl_hs + "' onerror=\"this.style.display='none'\"/>" if nfl_hs else "<div class='av' style='display:flex;align-items:center;justify-content:center;font-family:Bebas Neue,sans-serif;font-size:1.2rem;color:#4caf82;'>" + nfl_pos + "</div>"}
-                        <div>
-                            <div class="nm">{nfl_sel_player}&nbsp;<span class="pos">{nfl_pos}</span>{nfl_vbadge}</div>
-                            <div class="sb">{nfl_pt}&nbsp;&middot;&nbsp;{nfl_loc}&nbsp;<span class="opp">{nfl_sel_opp}</span>&nbsp;&middot;&nbsp;{nfl_location}</div>
-                        </div>
-                    </div>
-                    <span class="cf"><span class="cd"></span>{nfl_conf}</span>
-                </div>
-                <div class="body">
-                    <div class="hero-row">
-                        <div class="proj">
-                            <div class="pnum">{nfl_pv}</div>
-                            <div class="plbl">Projected {nfl_tinfo["label"]}</div>
-                        </div>
-                        <div class="meter-col">
-                            <svg width="90" height="52" viewBox="0 0 200 110" xmlns="http://www.w3.org/2000/svg">
-                                <path d="M20 100 A80 80 0 0 1 180 100" fill="none" stroke="#0d1f0d" stroke-width="18" stroke-linecap="round"/>
-                                <path d="M20 100 A80 80 0 0 1 180 100" fill="none" stroke="url(#ncg)" stroke-width="18" stroke-linecap="round"
-                                      stroke-dasharray="251" stroke-dashoffset="{int(251*(1-nfl_op/100))}"/>
-                                <defs><linearGradient id="ncg" x1="0" y1="0" x2="1" y2="0">
-                                    <stop offset="0%" stop-color="#e05a5a"/>
-                                    <stop offset="50%" stop-color="#d4b44a"/>
-                                    <stop offset="100%" stop-color="#4caf82"/>
-                                </linearGradient></defs>
-                                <line x1="100" y1="100" x2="{nfl_cnx:.1f}" y2="{nfl_cny:.1f}" stroke="#e8e6e0" stroke-width="2.5" stroke-linecap="round"/>
-                                <circle cx="100" cy="100" r="5" fill="#e8e6e0"/>
-                            </svg>
-                            <div class="meter-val">{nfl_op:.0f}%</div>
-                            <div class="meter-lbl">{nfl_conf}</div>
-                        </div>
-                        <div class="sgrid">
-                            <div class="sc"><div class="sv">{nfl_avg5}</div><div class="sl">L5 Avg</div></div>
-                            <div class="sc"><div class="sv">{nfl_avg10}</div><div class="sl">L10 Avg</div></div>
-                            <div class="sc"><div class="sv">{nfl_custom_line}</div><div class="sl">Line</div></div>
-                        </div>
-                    </div>
-                    <div class="edge-row">
-                        <div class="edge-badge">{nfl_ei}&nbsp;{nfl_ed} EDGE&nbsp;{'+' if nfl_edge>0 else ''}{nfl_edge:.1f}&nbsp;({int(nfl_edge_pct)}%)</div>
-                        <div class="trend-badge">{nfl_trt}</div>
-                    </div>
-                    <div class="ou">
-                        <div class="ot">Over / Under {nfl_custom_line} {nfl_tinfo["short"]}</div>
-                        <div class="or">
-                            <div class="ol">Over {nfl_custom_line}</div>
-                            <div class="ob"><div class="fo"></div></div>
-                            <div class="op2" style="color:{nfl_pc};">{nfl_op:.1f}%</div>
-                        </div>
-                        <div class="or">
-                            <div class="ol">Under {nfl_custom_line}</div>
-                            <div class="ob"><div class="fu"></div></div>
-                            <div class="op2" style="color:#4a9eff;">{nfl_up:.1f}%</div>
-                        </div>
-                    </div>
-                    {nfl_chart_block}
-                    <div class="meta">{nfl_ngames} games &nbsp;&middot;&nbsp; {NFL_SEASON} season &nbsp;&middot;&nbsp; Rolling avg model &nbsp;&middot;&nbsp; std {nfl_pred["std_dev"]}</div>
-                </div>
-            </div></body></html>"""
-
-            components.html(nfl_html_out, height=630, scrolling=False)
-
-            # Data note
-            if nfl_ngames == 0:
-                st.info(
-                    f"No gamelog data found for **{nfl_sel_player}** ({NFL_SEASON} season). "
-                    "Try clicking **Load NFL Data** in the left panel to fetch rosters, "
-                    "then run again. Some players may have limited data if injured or on practice squad."
-                )
-
-    st.markdown('</div>', unsafe_allow_html=True)
+    pip=[("NFL game logs (2019-2025)","#4caf82"),("Player stats per game","#4caf82"),
+         ("Team defensive ratings","#4caf82"),("Weather + stadium data","#d4b44a"),("Injury reports","#e05a5a")]
+    tgts=["Pass Yds","Rush Yds","Rec Yds","Pass TDs","Rush TDs","Rec TDs",
+          "Completions","Receptions","Targets","INTs","Pass Att","Rush Att","Carries","Long","YPC"]
+    ph_html="".join(f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:5px;'><div style='width:6px;height:6px;border-radius:50%;background:{c};'></div><span style='font-size:12px;color:#4a6a58;font-family:Inter,sans-serif;'>{t}</span></div>" for t,c in pip)
+    tg_html="".join(f"<span style='background:rgba(76,175,130,0.08);border:1px solid rgba(76,175,130,0.18);border-radius:4px;padding:2px 7px;font-size:10px;color:#4caf82;font-family:Inter,sans-serif;'>{t}</span> " for t in tgts)
+    nfl_html=f"""<!DOCTYPE html><html><head>
+    <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;600&display=swap' rel='stylesheet'>
+    <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;font-family:Inter,sans-serif;padding:24px 32px;}}
+    @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+    @keyframes prog{{0%{{width:20%}}100%{{width:58%}}}}
+    .hero{{position:relative;overflow:hidden;border-radius:14px;background:linear-gradient(135deg,#060e06,#0a180a);border:1px solid #143214;padding:28px 28px 24px;margin-bottom:12px;}}
+    .field{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
+    .badge{{display:flex;align-items:center;gap:6px;margin-bottom:7px;}}
+    .dot{{width:7px;height:7px;background:#4caf82;border-radius:50%;animation:pulse 1.4s infinite;}}
+    .cs{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4caf82;}}
+    .ttl{{font-family:'Bebas Neue',sans-serif;font-size:56px;color:#4caf82;letter-spacing:2px;line-height:1;margin-bottom:4px;}}
+    .sub{{font-size:11px;color:#2a5a3a;letter-spacing:2px;text-transform:uppercase;margin-bottom:24px;}}
+    .cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px;}}
+    .card{{background:rgba(76,175,130,0.05);border:1px solid rgba(76,175,130,0.12);border-radius:8px;padding:12px;}}
+    .ct{{font-family:'Bebas Neue',sans-serif;font-size:19px;color:#4caf82;margin-bottom:2px;}}
+    .cs2{{font-size:10px;color:#2a5a3a;letter-spacing:1px;text-transform:uppercase;}}
+    .pw{{display:flex;align-items:center;gap:14px;}}
+    .pb{{flex:1;height:3px;background:rgba(76,175,130,0.1);border-radius:2px;overflow:hidden;}}
+    .pf{{height:100%;background:#4caf82;border-radius:2px;width:20%;animation:prog 2.5s ease-in-out infinite alternate;}}
+    .pl{{font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:#2a5a3a;white-space:nowrap;}}
+    .g2{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+    .pn{{background:#060e06;border:1px solid #143214;border-radius:10px;padding:14px 16px;}}
+    .pt{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4caf82;margin-bottom:9px;}}
+    .tags{{display:flex;flex-wrap:wrap;gap:4px;}}
+    </style></head><body>
+    <div class='hero'><div class='field'>{_svg_field()}</div>
+        <div style='position:relative;z-index:1;'>
+        <div class='badge'><div class='dot'></div><span class='cs'>Coming Soon</span></div>
+        <div class='ttl'>NFL Props</div>
+        <div class='sub'>Rushing &middot; Receiving &middot; Passing &middot; Coming Q3 2026</div>
+        <div class='cards'>
+            <div class='card'><div class='ct'>Passing</div><div class='cs2'>Yds &middot; TDs &middot; Comp &middot; INTs</div></div>
+            <div class='card'><div class='ct'>Rushing</div><div class='cs2'>Yds &middot; TDs &middot; Att &middot; YPC</div></div>
+            <div class='card'><div class='ct'>Receiving</div><div class='cs2'>Yds &middot; Rec &middot; TDs &middot; Targets</div></div>
+        </div>
+        <div class='pw'><div class='pb'><div class='pf'></div></div>
+        <span class='pl'>Model training in progress</span></div>
+        </div>
+    </div>
+    <div class='g2'>
+        <div class='pn'><div class='pt'>Data pipeline</div>{ph_html}</div>
+        <div class='pn'><div class='pt'>Model targets</div><div class='tags'>{tg_html}</div></div>
+    </div></body></html>"""
+    components.html(nfl_html, height=600, scrolling=False)
