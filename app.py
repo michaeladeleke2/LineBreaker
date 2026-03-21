@@ -1570,15 +1570,25 @@ with picks_tab:
             with st.expander("🏆  PrizePicks Optimizer", expanded=False):
                 st.markdown('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.8rem;">Best 2 & 3-pick Power Play combos</div>', unsafe_allow_html=True)
                 import itertools as _it
-                high_df = display_df[display_df["confidence"].isin(["High","Medium"])].head(15) if "display_df" in dir() else qp_df.head(15)
-                picks_list = [row for _, row in high_df.iterrows()]
+
+                def _pick_win_prob(row):
+                    """Return probability of winning this pick (handles OVER/UNDER + pct/decimal)."""
+                    op = float(row["over_prob"])
+                    if op > 1:      # stored as percentage (0-100)
+                        op = op / 100
+                    return op if row["direction"] == "OVER" else (1 - op)
+
+                src_df = qp_df[qp_df["confidence"].isin(["High", "Medium"])].head(15)
+                if src_df.empty:
+                    src_df = qp_df.head(15)
+                picks_list = [row for _, row in src_df.iterrows()]
 
                 best_2, best_3 = [], []
                 for a, b in _it.combinations(picks_list, 2):
-                    prob = (a["over_prob"]/100) * (b["over_prob"]/100)
+                    prob = _pick_win_prob(a) * _pick_win_prob(b)
                     best_2.append((prob, a, b))
                 for a, b, c in _it.combinations(picks_list[:10], 3):
-                    prob = (a["over_prob"]/100) * (b["over_prob"]/100) * (c["over_prob"]/100)
+                    prob = _pick_win_prob(a) * _pick_win_prob(b) * _pick_win_prob(c)
                     best_3.append((prob, a, b, c))
                 best_2.sort(key=lambda x: -x[0])
                 best_3.sort(key=lambda x: -x[0])
@@ -1620,7 +1630,9 @@ with picks_tab:
                 for combo in _it2.combinations(opt_picks, 3):
                     prob = 1.0
                     for p in combo:
-                        prob *= p["over_prob"] / 100
+                        op = float(p["over_prob"])
+                        if op > 1: op = op / 100
+                        prob *= op if p["direction"] == "OVER" else (1 - op)
                     # EV = prob * payout - (1-prob) * 1 where payout ≈ (1/prob - 1) at fair odds
                     # Use DK 3-pick Power Play payout (6x)
                     ev = prob * 5 - (1 - prob)  # net EV on 1u
@@ -1642,7 +1654,9 @@ with picks_tab:
                         """, unsafe_allow_html=True)
                     combo_prob = 1.0
                     for p in top_combo:
-                        combo_prob *= p["over_prob"] / 100
+                        op2 = float(p["over_prob"])
+                        if op2 > 1: op2 = op2 / 100
+                        combo_prob *= op2 if p["direction"] == "OVER" else (1 - op2)
                     st.markdown(f"""
                     <div style="margin-top:0.8rem;display:flex;gap:1.5rem;">
                         <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Prob</span>
