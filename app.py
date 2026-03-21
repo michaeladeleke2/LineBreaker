@@ -28,6 +28,15 @@ except ImportError:
     def get_recent_predictions(*a, **k): return []
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
+try:
+    from data.fetch_nfl import (
+        fetch_nfl_teams, fetch_all_nfl_players, fetch_nfl_gamelog,
+        predict_nfl_prop, get_nfl_player_headshot, fetch_nfl_today_slate,
+        NFL_TARGET_DISPLAY, NFL_TARGET_GROUPS, NFL_THRESHOLDS, NFL_TEAM_COLORS, NFL_SEASON,
+    )
+    NFL_ENABLED = True
+except ImportError:
+    NFL_ENABLED = False
 
 TEAM_COLORS = {
     "ATL":"#E03A3E","BOS":"#007A33","BKN":"#AAAAAA","CHA":"#00788C",
@@ -118,16 +127,22 @@ div[data-baseweb="select"] > div {
 [data-testid="stTextInput"] input { background:#111118 !important; border-color:#1c1c28 !important; color:#e8e6e0 !important; border-radius:8px !important; }
 [data-testid="stExpander"] { background:#080810 !important; border:1px solid #0d0d15 !important; border-radius:8px !important; }
 
-/* Buttons */
+/* Buttons — primary (main actions) */
 [data-testid="stButton"] button[kind="primary"] {
     background:#f0672a !important; border:none !important;
     font-family:'Bebas Neue',sans-serif !important; font-size:1.15rem !important;
     letter-spacing:0.12em !important; border-radius:10px !important;
     width:100% !important; padding:0.65rem !important; margin-top:0.6rem !important; }
+/* Secondary buttons — visible subtle dark style */
 [data-testid="stButton"] button[kind="secondary"] {
-    background:transparent !important; border:none !important; color:transparent !important;
-    height:1px !important; min-height:1px !important; padding:0 !important;
-    margin:0 !important; font-size:0 !important; opacity:0 !important; overflow:hidden !important; }
+    background:#0d0d15 !important; border:1px solid #1a1a28 !important;
+    color:#2e2e42 !important; border-radius:6px !important;
+    font-size:0.65rem !important; font-weight:600 !important;
+    letter-spacing:0.08em !important; padding:0.35rem 0.5rem !important;
+    margin-top:0.25rem !important; width:100% !important; }
+[data-testid="stButton"] button[kind="secondary"]:hover {
+    background:#111118 !important; border-color:#252535 !important;
+    color:#505068 !important; }
 
 /* Sidebar off */
 [data-testid="stSidebar"] { display:none !important; }
@@ -215,6 +230,21 @@ def load_injuries():
 def load_lineups():
     try: return fetch_all_lineups()
     except: return pd.DataFrame()
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_nfl_teams():
+    try: return fetch_nfl_teams() if NFL_ENABLED else pd.DataFrame()
+    except: return pd.DataFrame()
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_nfl_players():
+    try: return fetch_all_nfl_players() if NFL_ENABLED else pd.DataFrame()
+    except: return pd.DataFrame()
+
+@st.cache_data(show_spinner=False, ttl=300)
+def load_nfl_slate():
+    try: return fetch_nfl_today_slate() if NFL_ENABLED else []
+    except: return []
 
 @st.cache_data(show_spinner=False)
 def _compute_picks_cached(conf: str, top_n: int, seed: int) -> pd.DataFrame:
@@ -840,6 +870,7 @@ with picks_tab:
         import time as _time
         st.session_state["qp_seed"] = int(_time.time())
         st.session_state.pop("qp_result", None)
+        st.rerun()  # clean rerun so computation starts fresh, button state cleared
 
     if clear_btn:
         st.session_state.pop("qp_result", None)
@@ -848,87 +879,141 @@ with picks_tab:
 
     seed = st.session_state.get("qp_seed", 0)
     if seed > 0 and "qp_result" not in st.session_state:
-        with st.spinner("Scanning today's slate… preloading player data and running predictions"):
+        with st.spinner("Scanning today's slate… this takes about 30–60 seconds"):
             df = _compute_picks_cached(qp_conf, qp_n, seed)
-            st.session_state["qp_result"] = df
-            st.session_state["qp_dir_filter"] = qp_dir
+        # store OUTSIDE spinner so session state persists even if UI redraws
+        st.session_state["qp_result"] = df
+        st.session_state["qp_dir_filter"] = qp_dir
+        st.rerun()  # force clean display rerun — prevents loop
 
     # Display from session state (survives tab switches)
     qp_df = st.session_state.get("qp_result")
     qp_dir_filter = st.session_state.get("qp_dir_filter", "All")
 
     if qp_df is None:
-        st.markdown("""
-        <div style="text-align:center;padding:3rem;color:#2a2a3a;">
-            <div style="font-size:3rem;margin-bottom:1rem;">⚡</div>
-            <div style="font-size:1rem;font-weight:600;color:#3a3a4a;">No picks yet</div>
-            <div style="font-size:0.72rem;margin-top:0.5rem;">
-                Click <strong style="color:#f0672a;">Generate Quick Picks</strong> to scan today's slate.
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Empty state — show a clean prompt
+        components.html(f"""<!DOCTYPE html><html><head>
+        <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@500;600&display=swap' rel='stylesheet'>
+        <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;}}
+        .w{{border-radius:16px;background:#0a0a12;border:1px solid #13131f;min-height:340px;
+             display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;}}
+        .i{{text-align:center;padding:2rem;position:relative;z-index:1;}}
+        .ico{{font-size:3rem;line-height:1;margin-bottom:1rem;opacity:0.3;}}
+        .t{{font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#1a1a28;}}
+        .s{{font-size:10px;color:#111118;letter-spacing:1px;margin-top:8px;line-height:1.6;}}
+        .hl{{color:#f0672a;}}
+        </style></head><body>
+        <div class='w'><div class='bg'>{_svg_court()}</div>
+        <div class='i'><div class='ico'>⚡</div>
+        <div class='t'>No picks generated yet</div>
+        <div class='s'>Hit <span class='hl'>Generate Quick Picks</span> to scan today's slate.<br>
+        Scans all players &amp; targets — takes ~30–60 seconds.</div>
+        </div></div></body></html>""", height=340, scrolling=False)
+
     elif qp_df.empty:
-        st.info("No picks found for today's slate. Check that there are NBA games scheduled today.")
+        st.warning("⚠️ No picks found. Either no NBA games are scheduled today, or player data needs to be synced (use Sync Data in the NBA tab).")
     else:
         # Apply direction filter
         display_df = qp_df.copy()
         if qp_dir_filter != "All":
             display_df = display_df[display_df["direction"] == qp_dir_filter]
         if display_df.empty:
-            st.info(f"No {qp_dir_filter} picks. Try removing the direction filter.")
+            st.info(f"No {qp_dir_filter} picks in today's slate. Try removing the direction filter.")
         else:
-            st.markdown(f'<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.8rem;">{len(display_df)} picks found</div>', unsafe_allow_html=True)
+            # ── Top 3 Hero Picks ──────────────────────────────────────────
+            top3 = display_df.head(3)
+            hero_cols = st.columns(len(top3))
+            for idx, (_, row) in enumerate(top3.iterrows()):
+                pc_h    = TEAM_COLORS.get(row["team"], "#f0672a")
+                conf_c  = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
+                arrow_h = "⬆" if row["direction"] == "OVER" else "⬇"
+                try:
+                    r2,g2,b2 = int(pc_h[1:3],16),int(pc_h[3:5],16),int(pc_h[5:7],16)
+                    bg_h = f"rgba({r2},{g2},{b2},0.08)"
+                except: bg_h = "#0a0a12"
+                # get player ID for headshot
+                p_match = players_df[players_df["full_name"] == row["player"]]
+                hs_h = _headshot(int(p_match.iloc[0]["id"])) if not p_match.empty else ""
+                with hero_cols[idx]:
+                    components.html(f"""<!DOCTYPE html><html><head>
+                    <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@500;600;700&display=swap' rel='stylesheet'>
+                    <style>*{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;}}
+                    .c{{background:{bg_h};border:1px solid {pc_h}33;border-radius:12px;border-top:2px solid {pc_h};
+                         padding:14px;overflow:hidden;position:relative;}}
+                    .rank{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:{pc_h};margin-bottom:8px;}}
+                    .hs{{width:42px;height:42px;border-radius:50%;border:2px solid {pc_h};object-fit:cover;object-position:top;
+                          background:#0d0d15;float:right;margin-left:8px;}}
+                    .nm{{font-size:13px;font-weight:700;color:#f0ede8;line-height:1.2;}}
+                    .tm{{font-size:9px;color:#2a2a3a;margin-top:2px;}}
+                    .prop{{font-family:'Bebas Neue',sans-serif;font-size:28px;color:{pc_h};line-height:1;margin:10px 0 4px;}}
+                    .det{{font-size:9px;color:#252535;}}
+                    .prob{{font-size:11px;font-weight:700;color:{conf_c};margin-top:6px;}}
+                    </style></head><body>
+                    <div class='c'>
+                        <div class='rank'>#{idx+1} Best Edge</div>
+                        {"<img class='hs' src='" + hs_h + "' onerror=\"this.style.display='none'\"/>" if hs_h else ""}
+                        <div class='nm'>{row["player"].split()[-1]}</div>
+                        <div class='tm'>{row["team"]} &middot; {row["opponent"]}</div>
+                        <div class='prop'>{arrow_h} {row["short"]}</div>
+                        <div class='det'>Proj {row["predicted"]} &middot; Line {row["line"]}</div>
+                        <div class='prob'>{row["direction"]} {row["over_prob"]}%</div>
+                    </div></body></html>""", height=160, scrolling=False)
+
+            st.markdown(f'<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#1e1e2e;margin:1rem 0 0.6rem;">All {len(display_df)} picks — ranked by edge</div>', unsafe_allow_html=True)
+
+            # ── Full ranked list ──────────────────────────────────────────
             try:
-                for _, row in display_df.iterrows():
+                for rank, (_, row) in enumerate(display_df.iterrows(), 1):
                     arrow    = "⬆" if row["direction"] == "OVER" else "⬇"
                     pc       = TEAM_COLORS.get(row["team"], "#f0672a")
                     conf_c   = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
-                    edge_w   = min(100, int(row["edge"] * 15))
+                    edge_w   = min(100, int(row["edge"] * 12))
                     trend    = row.get("trend", "→")
                     l5       = row.get("l5_avg", 0)
                     l10      = row.get("l10_avg", 0)
+                    # get headshot
+                    p_match  = players_df[players_df["full_name"] == row["player"]]
+                    hs_url   = _headshot(int(p_match.iloc[0]["id"])) if not p_match.empty else ""
                     try:
                         r2,g2,b2 = int(pc[1:3],16),int(pc[3:5],16),int(pc[5:7],16)
-                        pc_bg = f"rgba({r2},{g2},{b2},0.06)"
-                    except:
-                        pc_bg = "#0a0a12"
+                        pc_bg = f"rgba({r2},{g2},{b2},0.05)"
+                    except: pc_bg = "#0a0a12"
+
+                    hs_img = (f'<img src="{hs_url}" style="width:38px;height:38px;border-radius:50%;'
+                              f'border:1.5px solid {pc};object-fit:cover;object-position:top;'
+                              f'background:#0d0d15;flex-shrink:0;" onerror="this.style.display=\'none\'"/>') if hs_url else ""
 
                     st.markdown(f"""
-                    <div style="background:{pc_bg};border:1px solid rgba(255,255,255,0.06);border-radius:12px;
-                                padding:1rem 1.2rem;margin-bottom:0.5rem;border-left:3px solid {pc};">
-                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.6rem;">
-                            <div>
-                                <span style="font-size:1rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
-                                <span style="font-size:0.68rem;color:#2a2a3a;margin-left:0.5rem;">{row["team"]} vs {row["opponent"]}</span>
+                    <div style="background:{pc_bg};border:1px solid #0d0d15;border-radius:10px;
+                                padding:0.75rem 1rem;margin-bottom:0.4rem;border-left:2px solid {pc};
+                                display:flex;align-items:center;gap:0.9rem;">
+                        <div style="font-size:0.6rem;font-weight:700;color:#1e1e2e;min-width:16px;text-align:center;">{rank}</div>
+                        {hs_img}
+                        <div style="flex:1;min-width:0;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;">
+                                <span style="font-size:0.88rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
+                                <span style="background:{conf_c}18;color:{conf_c};border:1px solid {conf_c}33;
+                                             border-radius:20px;padding:1px 7px;font-size:8px;font-weight:700;
+                                             letter-spacing:1px;flex-shrink:0;">{row["confidence"].upper()}</span>
                             </div>
-                            <div style="display:flex;align-items:center;gap:6px;">
-                                <span style="font-size:0.68rem;color:#f0672a;">{trend}</span>
-                                <span style="background:rgba(76,175,130,0.08);color:{conf_c};border:1px solid {conf_c}33;
-                                             border-radius:20px;padding:2px 8px;font-size:9px;font-weight:700;letter-spacing:1px;">
-                                    {row["confidence"].upper()}
-                                </span>
-                            </div>
-                        </div>
-                        <div style="display:flex;align-items:center;gap:1.2rem;">
-                            <div style="font-family:'Bebas Neue',sans-serif;font-size:2.2rem;color:{pc};line-height:1;min-width:80px;">
-                                {arrow} {row["short"]}
-                            </div>
-                            <div style="flex:1;">
-                                <div style="font-size:0.7rem;color:#3a3a4a;margin-bottom:4px;">
-                                    Proj&nbsp;<strong style="color:#e8e6e0;">{row["predicted"]}</strong>
-                                    &nbsp;· Line&nbsp;<strong style="color:#e8e6e0;">{row["line"]}</strong>
-                                    &nbsp;· {row["direction"]}&nbsp;<strong style="color:{pc};">{row["over_prob"]}%</strong>
-                                </div>
-                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                                    <span style="font-size:9px;color:#2a2a3a;text-transform:uppercase;letter-spacing:1px;min-width:28px;">Edge</span>
-                                    <div style="flex:1;height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;">
-                                        <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
+                            <div style="display:flex;align-items:center;gap:0.8rem;">
+                                <span style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};line-height:1;">{arrow} {row["short"]}</span>
+                                <div style="flex:1;">
+                                    <div style="font-size:0.68rem;color:#2a2a3a;">
+                                        {row["team"]}&nbsp;vs&nbsp;{row["opponent"]}&nbsp;&middot;&nbsp;
+                                        Proj <strong style="color:#e8e6e0;">{row["predicted"]}</strong>&nbsp;&middot;&nbsp;
+                                        Line <strong style="color:#e8e6e0;">{row["line"]}</strong>&nbsp;&middot;&nbsp;
+                                        <strong style="color:{pc};">{row["direction"]} {row["over_prob"]}%</strong>
+                                        &nbsp;&middot;&nbsp;<span style="color:#2a2a3a;">{trend}</span>
                                     </div>
-                                    <span style="font-size:10px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
-                                </div>
-                                <div style="font-size:9px;color:#252535;">
-                                    L5&nbsp;<strong style="color:#e8e6e0;">{l5}</strong>
-                                    &nbsp;·&nbsp;L10&nbsp;<strong style="color:#e8e6e0;">{l10}</strong>
+                                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+                                        <span style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Edge</span>
+                                        <div style="flex:1;height:2px;background:#1a1a28;border-radius:2px;overflow:hidden;">
+                                            <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
+                                        </div>
+                                        <span style="font-size:9px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
+                                        <span style="font-size:8px;color:#1a1a28;">L5 {l5} &middot; L10 {l10}</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1032,54 +1117,349 @@ with accuracy_tab:
             """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# NFL TAB
+# ══════════════════════════════════════════════════════════════════════════════
 with nfl_tab:
-    pip=[("NFL game logs (2019-2025)","#4caf82"),("Player stats per game","#4caf82"),
-         ("Team defensive ratings","#4caf82"),("Weather + stadium data","#d4b44a"),("Injury reports","#e05a5a")]
-    tgts=["Pass Yds","Rush Yds","Rec Yds","Pass TDs","Rush TDs","Rec TDs",
-          "Completions","Receptions","Targets","INTs","Pass Att","Rush Att","Carries","Long","YPC"]
-    ph_html="".join(f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:5px;'><div style='width:6px;height:6px;border-radius:50%;background:{c};'></div><span style='font-size:12px;color:#4a6a58;font-family:Inter,sans-serif;'>{t}</span></div>" for t,c in pip)
-    tg_html="".join(f"<span style='background:rgba(76,175,130,0.08);border:1px solid rgba(76,175,130,0.18);border-radius:4px;padding:2px 7px;font-size:10px;color:#4caf82;font-family:Inter,sans-serif;'>{t}</span> " for t in tgts)
-    nfl_html=f"""<!DOCTYPE html><html><head>
-    <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;600&display=swap' rel='stylesheet'>
-    <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;font-family:Inter,sans-serif;padding:24px 32px;}}
-    @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
-    @keyframes prog{{0%{{width:20%}}100%{{width:58%}}}}
-    .hero{{position:relative;overflow:hidden;border-radius:14px;background:linear-gradient(135deg,#060e06,#0a180a);border:1px solid #143214;padding:28px 28px 24px;margin-bottom:12px;}}
-    .field{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
-    .badge{{display:flex;align-items:center;gap:6px;margin-bottom:7px;}}
-    .dot{{width:7px;height:7px;background:#4caf82;border-radius:50%;animation:pulse 1.4s infinite;}}
-    .cs{{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4caf82;}}
-    .ttl{{font-family:'Bebas Neue',sans-serif;font-size:56px;color:#4caf82;letter-spacing:2px;line-height:1;margin-bottom:4px;}}
-    .sub{{font-size:11px;color:#2a5a3a;letter-spacing:2px;text-transform:uppercase;margin-bottom:24px;}}
-    .cards{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:24px;}}
-    .card{{background:rgba(76,175,130,0.05);border:1px solid rgba(76,175,130,0.12);border-radius:8px;padding:12px;}}
-    .ct{{font-family:'Bebas Neue',sans-serif;font-size:19px;color:#4caf82;margin-bottom:2px;}}
-    .cs2{{font-size:10px;color:#2a5a3a;letter-spacing:1px;text-transform:uppercase;}}
-    .pw{{display:flex;align-items:center;gap:14px;}}
-    .pb{{flex:1;height:3px;background:rgba(76,175,130,0.1);border-radius:2px;overflow:hidden;}}
-    .pf{{height:100%;background:#4caf82;border-radius:2px;width:20%;animation:prog 2.5s ease-in-out infinite alternate;}}
-    .pl{{font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:#2a5a3a;white-space:nowrap;}}
-    .g2{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
-    .pn{{background:#060e06;border:1px solid #143214;border-radius:10px;padding:14px 16px;}}
-    .pt{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4caf82;margin-bottom:9px;}}
-    .tags{{display:flex;flex-wrap:wrap;gap:4px;}}
-    </style></head><body>
-    <div class='hero'><div class='field'>{_svg_field()}</div>
-        <div style='position:relative;z-index:1;'>
-        <div class='badge'><div class='dot'></div><span class='cs'>Coming Soon</span></div>
-        <div class='ttl'>NFL Props</div>
-        <div class='sub'>Rushing &middot; Receiving &middot; Passing &middot; Coming Q3 2026</div>
-        <div class='cards'>
-            <div class='card'><div class='ct'>Passing</div><div class='cs2'>Yds &middot; TDs &middot; Comp &middot; INTs</div></div>
-            <div class='card'><div class='ct'>Rushing</div><div class='cs2'>Yds &middot; TDs &middot; Att &middot; YPC</div></div>
-            <div class='card'><div class='ct'>Receiving</div><div class='cs2'>Yds &middot; Rec &middot; TDs &middot; Targets</div></div>
+    if not NFL_ENABLED:
+        st.error("NFL module not found. Make sure `data/fetch_nfl.py` exists.")
+        st.stop()
+
+    # ── Load NFL data (cached) ─────────────────────────────────────────────
+    nfl_teams_df   = load_nfl_teams()
+    nfl_players_df = load_nfl_players()
+    nfl_slate      = load_nfl_slate()
+
+    # ── Today's NFL Slate ──────────────────────────────────────────────────
+    if nfl_slate:
+        st.markdown('<span class="slate-hdr">Today\'s NFL Games</span>', unsafe_allow_html=True)
+        ns = min(len(nfl_slate), 8)
+        ncols = st.columns(ns)
+        for i, g in enumerate(nfl_slate[:ns]):
+            ha, aa = g["home_abbr"], g["away_abbr"]
+            hc = NFL_TEAM_COLORS.get(ha, "#888")
+            ac = NFL_TEAM_COLORS.get(aa, "#888")
+            gst = g["status"]
+            if gst == "live":
+                hp, ap = g.get("home_pts",""), g.get("away_pts","")
+                ts, tc = (f"LIVE {ap}-{hp}" if (hp or ap) else "LIVE"), "#e05a5a"
+            elif gst == "final":
+                hp, ap = g.get("home_pts",""), g.get("away_pts","")
+                ts, tc = f"Final {ap}-{hp}", "#3a3a50"
+            else:
+                ts, tc = g.get("game_time","TBD")[:5], "#3a3a50"
+            fl = "<link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@500;600&display=swap' rel='stylesheet'>"
+            cs = (f"*{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;}}"
+                  f".c{{border:2px solid #1a2a1a;border-radius:8px;padding:7px 8px;background:#060e06;}}"
+                  f".t{{font-size:9px;font-weight:600;color:{tc};letter-spacing:1px;text-transform:uppercase;margin-bottom:3px;}}"
+                  f".r{{display:flex;align-items:center;justify-content:center;gap:5px;}}"
+                  f".a{{font-family:'Bebas Neue',sans-serif;font-size:16px;line-height:1;}}"
+                  f".s{{font-size:8px;color:#2a5a3a;text-align:center;margin-top:1px;}}"
+                  f".at{{font-size:9px;color:#1a3a1a;font-weight:700;}}")
+            bd = (f"<div class='c'><div class='t'>{ts}</div><div class='r'>"
+                  f"<div><div class='a' style='color:{ac}'>{aa}</div></div>"
+                  f"<div class='at'>@</div>"
+                  f"<div><div class='a' style='color:{hc}'>{ha}</div></div>"
+                  f"</div></div>")
+            with ncols[i]:
+                components.html(f"<!DOCTYPE html><html><head>{fl}<style>{cs}</style></head><body>{bd}</body></html>",
+                               height=55, scrolling=False)
+        st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="background:#060e06;border:1px solid #143214;border-radius:10px;
+                    padding:0.9rem 1.2rem;margin-bottom:1.2rem;display:flex;align-items:center;gap:0.8rem;">
+            <div style="font-size:1.3rem;">🏈</div>
+            <div>
+                <div style="font-size:0.75rem;font-weight:700;color:#2a5a3a;letter-spacing:0.1em;text-transform:uppercase;">NFL Offseason</div>
+                <div style="font-size:0.65rem;color:#1a3a1a;margin-top:2px;">No games today — search any player to view 2025 season projections</div>
+            </div>
         </div>
-        <div class='pw'><div class='pb'><div class='pf'></div></div>
-        <span class='pl'>Model training in progress</span></div>
-        </div>
-    </div>
-    <div class='g2'>
-        <div class='pn'><div class='pt'>Data pipeline</div>{ph_html}</div>
-        <div class='pn'><div class='pt'>Model targets</div><div class='tags'>{tg_html}</div></div>
-    </div></body></html>"""
-    components.html(nfl_html, height=600, scrolling=False)
+        """, unsafe_allow_html=True)
+
+    # ── Layout ─────────────────────────────────────────────────────────────
+    nfl_left, nfl_right = st.columns([1, 2], gap="large")
+
+    with nfl_left:
+        st.markdown('<div class="ctrl-panel">', unsafe_allow_html=True)
+
+        nfl_search = st.text_input("🔍  Search player", placeholder="Name…", key="nfl_search",
+                                   label_visibility="visible")
+
+        if not nfl_players_df.empty:
+            with st.expander("Filter", expanded=False):
+                nfl_pos_opts = ["All"] + sorted(nfl_players_df["position"].dropna().unique().tolist())
+                nfl_team_opts = ["All"] + sorted(nfl_players_df["team_abbreviation"].dropna().unique().tolist())
+                nfl_f_pos  = st.selectbox("Position", nfl_pos_opts, key="nfl_fpos")
+                nfl_f_team = st.selectbox("Team",     nfl_team_opts, key="nfl_fteam")
+
+            nfl_filt = nfl_players_df.copy()
+            if nfl_search:
+                nfl_filt = nfl_filt[nfl_filt["full_name"].str.contains(nfl_search, case=False, na=False)]
+            if nfl_f_pos  != "All": nfl_filt = nfl_filt[nfl_filt["position"] == nfl_f_pos]
+            if nfl_f_team != "All": nfl_filt = nfl_filt[nfl_filt["team_abbreviation"] == nfl_f_team]
+            nfl_opts = nfl_filt["full_name"].tolist() or nfl_players_df["full_name"].tolist()
+        else:
+            nfl_opts = []
+
+        nfl_run_btn = False  # default so right column can always reference it
+        if not nfl_opts:
+            st.warning("No players loaded. Click **Load Rosters** below.")
+        else:
+            st.markdown('<span class="ctrl-label">Player</span>', unsafe_allow_html=True)
+            nfl_sel_player = st.selectbox("NFL Player", options=nfl_opts, key="nfl_player",
+                                          label_visibility="collapsed")
+
+            # Determine position for stat filtering
+            p_match = nfl_players_df[nfl_players_df["full_name"] == nfl_sel_player]
+            nfl_pos = p_match.iloc[0]["position"] if not p_match.empty else "QB"
+
+            # Filter targets by position
+            pos_targets = {k: v for k, v in NFL_TARGET_DISPLAY.items() if nfl_pos in v.get("pos", [])}
+            if not pos_targets:
+                pos_targets = NFL_TARGET_DISPLAY
+
+            nfl_stat_opts = [f"{v['label']} ({v['short']})" for k, v in pos_targets.items()]
+            nfl_stat_map  = {f"{v['label']} ({v['short']})": k for k, v in pos_targets.items()}
+
+            st.markdown('<span class="ctrl-label">Location</span>', unsafe_allow_html=True)
+            nfl_location = st.radio("nfl_loc", ["Home", "Away"], horizontal=True, key="nfl_loc",
+                                    label_visibility="collapsed")
+
+            st.markdown('<span class="ctrl-label">Stat</span>', unsafe_allow_html=True)
+            nfl_sel_stat_d = st.selectbox("NFL Stat", options=nfl_stat_opts, key="nfl_stat",
+                                          label_visibility="collapsed")
+            nfl_target = nfl_stat_map.get(nfl_sel_stat_d, list(pos_targets.keys())[0])
+            nfl_tinfo  = NFL_TARGET_DISPLAY.get(nfl_target, {"label": nfl_target, "short": nfl_target})
+
+            st.markdown('<span class="ctrl-label">Over/Under Line</span>', unsafe_allow_html=True)
+            nfl_default_line = NFL_THRESHOLDS.get(nfl_target, 50)
+            nfl_line = st.slider("nfl_line", 0, 500, value=int(nfl_default_line), key="nfl_line",
+                                 label_visibility="collapsed")
+
+            nfl_run_btn = st.button("▶  Run NFL Prediction", use_container_width=True,
+                                    type="primary", key="nfl_run")
+
+        # ── Data management ────────────────────────────────────────────────
+        st.divider()
+        st.caption("NFL DATA")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📋 Load Rosters", use_container_width=True, key="nfl_load",
+                         help="Fetch all 32 NFL team rosters from ESPN (~2 min)"):
+                with st.spinner("Fetching NFL rosters…"):
+                    try:
+                        fetch_all_nfl_players(force_refresh=True)
+                        load_nfl_players.clear()
+                        st.success("✅ Rosters loaded!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+        with c2:
+            if st.button("🔄 Refresh", use_container_width=True, key="nfl_refresh",
+                         help="Clear NFL cache and reload"):
+                load_nfl_players.clear()
+                load_nfl_teams.clear()
+                load_nfl_slate.clear()
+                st.success("✅ Cache cleared!")
+                st.rerun()
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── NFL Prediction Output ──────────────────────────────────────────────
+    with nfl_right:
+        if nfl_opts and nfl_run_btn:
+            p_row_nfl = nfl_players_df[nfl_players_df["full_name"] == nfl_sel_player]
+            if p_row_nfl.empty:
+                st.error("Player not found.")
+            else:
+                p_row_nfl = p_row_nfl.iloc[0]
+                pid_nfl   = str(p_row_nfl["player_id"])
+                pt_nfl    = str(p_row_nfl.get("team_abbreviation", "")).upper()
+                pc_nfl    = NFL_TEAM_COLORS.get(pt_nfl, "#4caf82")
+                hs_nfl    = str(p_row_nfl.get("headshot_url", ""))
+
+                with st.spinner(f"Fetching {nfl_sel_player} game logs…"):
+                    nfl_pred = predict_nfl_prop(
+                        player_id   = pid_nfl,
+                        target      = nfl_target,
+                        custom_line = float(nfl_line),
+                        is_home     = (nfl_location == "Home"),
+                        season      = NFL_SEASON,
+                    )
+
+                op_nfl  = round(nfl_pred["over_prob"]  * 100, 1)
+                up_nfl  = round(nfl_pred["under_prob"] * 100, 1)
+                cc_nfl  = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}
+                cb_nfl  = {"High":"rgba(76,175,130,0.12)","Medium":"rgba(212,180,74,0.12)","Low":"rgba(224,90,90,0.12)"}
+                cbo_nfl = {"High":"rgba(76,175,130,0.3)","Medium":"rgba(212,180,74,0.3)","Low":"rgba(224,90,90,0.3)"}
+                conf    = nfl_pred["confidence"]
+                cco_nfl = cc_nfl.get(conf, "#4caf82")
+                loc_nfl = "vs." if nfl_location == "Home" else "@"
+
+                # Trend
+                l5_nfl  = nfl_pred["recent_avg_5"]
+                l10_nfl = nfl_pred["recent_avg_10"]
+                if l10_nfl > 0:
+                    ratio_nfl = l5_nfl / l10_nfl
+                    trend_nfl = "🔥 HOT" if ratio_nfl >= 1.10 else "🥶 COLD" if ratio_nfl <= 0.90 else "→ STEADY"
+                else:
+                    trend_nfl = "→ STEADY"
+
+                # Edge
+                edge_nfl     = round(nfl_pred["predicted_value"] - nfl_line, 1)
+                edge_pct_nfl = round(abs(edge_nfl) / max(nfl_line, 1) * 100, 1)
+                edge_dir_nfl = "OVER" if edge_nfl >= 0 else "UNDER"
+
+                # Mini chart (recent games)
+                rg_nfl = nfl_pred.get("recent_games", [])
+                chart_nfl = ""
+                if rg_nfl:
+                    W,H,PL,PR,PT,PB = 560,130,10,50,15,28
+                    vld  = [v for v in rg_nfl if v==v and v is not None]
+                    mx   = max(vld)*1.2 if vld else 1
+                    mn   = max(0, min(vld)*0.8) if vld else 0
+                    rng  = mx - mn if mx != mn else 1
+                    av_v = sum(vld)/len(vld) if vld else 0
+                    n_nfl = len(rg_nfl)
+                    def yx2(v): return PT+(1-(v-mn)/rng)*(H-PT-PB)
+                    def xx2(i): return PL+i*(W-PL-PR)/max(n_nfl-1,1)
+                    pts2 = " ".join(f"{xx2(i):.1f},{yx2(v):.1f}" for i,v in enumerate(rg_nfl) if v==v)
+                    fx2,lx2,by2 = xx2(0),xx2(n_nfl-1),H-PB
+                    ap2 = f"M {fx2:.1f},{by2} "+" ".join(f"L {xx2(i):.1f},{yx2(v):.1f}" for i,v in enumerate(rg_nfl) if v==v)+f" L {lx2:.1f},{by2} Z"
+                    dots2 = ""
+                    for i2,v2 in enumerate(rg_nfl):
+                        if v2 != v2: continue
+                        cx3,cy3 = xx2(i2),yx2(v2)
+                        col3 = pc_nfl if v2 >= nfl_line else "#1e2535"
+                        dots2 += f'<circle cx="{cx3:.1f}" cy="{cy3:.1f}" r="4" fill="{col3}" stroke="#080810" stroke-width="1.5"/>'
+                        ly5 = cy3-10 if cy3>PT+15 else cy3+17
+                        fc3 = "#c8c6c0" if v2 >= nfl_line else "#2a3040"
+                        dots2 += f'<text x="{cx3:.1f}" y="{ly5:.1f}" text-anchor="middle" font-size="10" font-weight="600" fill="{fc3}" font-family="Inter,sans-serif">{int(v2)}</text>'
+                    ay3 = yx2(av_v); ly6 = yx2(nfl_line)
+                    rl2 = f'<line x1="{PL}" y1="{ay3:.1f}" x2="{W-PR}" y2="{ay3:.1f}" stroke="#1e1e2e" stroke-dasharray="3,4" stroke-width="1"/>'
+                    rl2 += f'<text x="{W-PR+4}" y="{ay3+4:.1f}" font-size="9" fill="#252535" font-family="Inter,sans-serif">avg {av_v:.1f}</text>'
+                    if PT<=ly6<=H-PB:
+                        rl2 += f'<line x1="{PL}" y1="{ly6:.1f}" x2="{W-PR}" y2="{ly6:.1f}" stroke="{pc_nfl}" stroke-dasharray="4,3" stroke-width="1.5" opacity="0.6"/>'
+                        rl2 += f'<text x="{W-PR+4}" y="{ly6+4:.1f}" font-size="9" fill="{pc_nfl}" font-family="Inter,sans-serif">{nfl_line}</text>'
+                    chart_nfl = (f'<svg width="100%" viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;">'
+                                 f'<defs><linearGradient id="ng" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="{pc_nfl}" stop-opacity="0.2"/><stop offset="100%" stop-color="{pc_nfl}" stop-opacity="0"/></linearGradient></defs>'
+                                 f'{rl2}<path d="{ap2}" fill="url(#ng)"/>'
+                                 f'<polyline points="{pts2}" fill="none" stroke="{pc_nfl}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>{dots2}</svg>')
+
+                nfl_html = f"""<!DOCTYPE html><html><head>
+                <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+                <style>
+                *{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;color:#e8e6e0;}}
+                .card{{background:#060e06;border-radius:16px;overflow:hidden;border:1px solid #143214;}}
+                .top{{height:3px;background:linear-gradient(90deg,{pc_nfl} 0%,transparent 100%);}}
+                .hdr{{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 14px;border-bottom:1px solid #0d1a0d;gap:12px;}}
+                .hl{{display:flex;align-items:center;gap:12px;flex:1;min-width:0;}}
+                .av{{width:52px;height:52px;border-radius:50%;border:2px solid {pc_nfl};object-fit:cover;object-position:top;background:#0d1a0d;flex-shrink:0;}}
+                .nm{{font-size:18px;font-weight:700;letter-spacing:-0.02em;color:#f0ede8;line-height:1.1;}}
+                .sb{{font-size:11px;color:#2a5a3a;margin-top:3px;}}
+                .opp{{color:{pc_nfl};font-weight:600;}}
+                .cf{{display:inline-flex;align-items:center;gap:4px;border-radius:20px;padding:3px 10px;
+                      font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+                      background:{cb_nfl.get(conf,"rgba(76,175,130,0.12)")};
+                      color:{cco_nfl};border:1px solid {cbo_nfl.get(conf,"rgba(76,175,130,0.3)")};}}
+                .cd{{width:5px;height:5px;border-radius:50%;background:{cco_nfl};}}
+                .body{{padding:18px 20px 16px;}}
+                .hero-row{{display:flex;align-items:flex-end;gap:20px;margin-bottom:18px;padding-bottom:18px;border-bottom:1px solid #0d1a0d;}}
+                .pnum{{font-family:'Bebas Neue',sans-serif;font-size:min(96px,18vw);line-height:0.85;color:{pc_nfl};
+                        text-shadow:0 0 60px {pc_nfl}44;letter-spacing:0.01em;}}
+                .plbl{{font-size:9px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#1e3a1e;margin-top:6px;}}
+                .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
+                .sc{{background:#0d1a0d;border-radius:10px;padding:10px 12px;}}
+                .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
+                .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a3a1a;}}
+                .ou{{margin-bottom:16px;}}
+                .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a3a1a;margin-bottom:10px;}}
+                .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
+                .ol{{font-size:11px;font-weight:500;color:#2a5a3a;min-width:72px;}}
+                .ob{{flex:1;height:5px;background:#0d1a0d;border-radius:3px;overflow:hidden;}}
+                .fo{{height:100%;background:{pc_nfl};border-radius:3px;width:{op_nfl:.1f}%;}}
+                .fu{{height:100%;background:#2a5a9f;border-radius:3px;width:{up_nfl:.1f}%;}}
+                .op2{{font-family:'Bebas Neue',sans-serif;font-size:1.3rem;min-width:48px;text-align:right;line-height:1;}}
+                .trend{{font-size:10px;font-weight:600;color:#2a5a3a;margin-bottom:14px;}}
+                .chart-wrap{{padding-top:14px;border-top:1px solid #0d1a0d;}}
+                .meta{{font-size:9px;color:#1a3a1a;margin-top:8px;padding-top:10px;border-top:1px solid #060e06;}}
+                </style></head><body>
+                <div class="card">
+                    <div class="top"></div>
+                    <div class="hdr">
+                        <div class="hl">
+                            {"<img class='av' src='" + hs_nfl + "' onerror=\"this.style.display='none'\"/>" if hs_nfl else ""}
+                            <div>
+                                <div class="nm">{nfl_sel_player}</div>
+                                <div class="sb">{pt_nfl}&nbsp;&middot;&nbsp;{loc_nfl}&nbsp;<span class="opp">NFL</span>&nbsp;&middot;&nbsp;{nfl_location}</div>
+                            </div>
+                        </div>
+                        <span class="cf"><span class="cd"></span>{conf}</span>
+                    </div>
+                    <div class="body">
+                        <div class="hero-row">
+                            <div class="proj">
+                                <div class="pnum">{nfl_pred["predicted_value"]}</div>
+                                <div class="plbl">Projected {nfl_tinfo["label"]}</div>
+                            </div>
+                            <div class="sgrid">
+                                <div class="sc"><div class="sv">{l5_nfl}</div><div class="sl">L5 Avg</div></div>
+                                <div class="sc"><div class="sv">{l10_nfl}</div><div class="sl">L10 Avg</div></div>
+                                <div class="sc"><div class="sv">{nfl_line}</div><div class="sl">Line</div></div>
+                            </div>
+                        </div>
+                        <div class="trend">{trend_nfl}&nbsp;&nbsp;Edge:&nbsp;
+                            <strong style="color:{'#4caf82' if edge_nfl >= 0 else '#e05a5a'}">
+                                {'▲' if edge_nfl >= 0 else '▼'} {edge_dir_nfl} {abs(edge_nfl)} ({edge_pct_nfl}%)
+                            </strong>
+                        </div>
+                        <div class="ou">
+                            <div class="ot">Over / Under {nfl_line} {nfl_tinfo["short"]}</div>
+                            <div class="or">
+                                <div class="ol">Over {nfl_line}</div>
+                                <div class="ob"><div class="fo"></div></div>
+                                <div class="op2" style="color:{pc_nfl};">{op_nfl:.1f}%</div>
+                            </div>
+                            <div class="or">
+                                <div class="ol">Under {nfl_line}</div>
+                                <div class="ob"><div class="fu"></div></div>
+                                <div class="op2" style="color:#4a9eff;">{up_nfl:.1f}%</div>
+                            </div>
+                        </div>
+                        {"<div class='chart-wrap'><div style='font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a3a1a;margin-bottom:10px;'>Last " + str(n_nfl) + " games &mdash; " + nfl_tinfo["label"] + "</div>" + chart_nfl + "</div>" if chart_nfl else ""}
+                        <div class="meta">Rolling-average model &nbsp;&middot;&nbsp; {nfl_pred["n_games"]} games &nbsp;&middot;&nbsp; {NFL_SEASON} season &nbsp;&middot;&nbsp; Std dev {nfl_pred["std_dev"]}</div>
+                    </div>
+                </div></body></html>"""
+
+                components.html(nfl_html, height=580, scrolling=False)
+
+                nfl_share = (
+                    f"🏈 LineBreaker NFL Prediction\n"
+                    f"{nfl_sel_player} — {nfl_tinfo['label']}\n"
+                    f"Projected: {nfl_pred['predicted_value']} | Line: {nfl_line}\n"
+                    f"{'OVER' if op_nfl > 50 else 'UNDER'} {nfl_line} ({op_nfl:.1f}%)\n"
+                    f"Confidence: {conf}"
+                )
+                st.code(nfl_share, language=None)
+
+        elif not nfl_opts:
+            pass  # warning already shown in left panel
+        else:
+            # Placeholder
+            ph_nfl = f"""<!DOCTYPE html><html><head>
+            <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@600&display=swap' rel='stylesheet'>
+            <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;}}
+            .w{{position:relative;overflow:hidden;border-radius:16px;background:#060e06;border:1px solid #143214;
+                 min-height:420px;display:flex;align-items:center;justify-content:center;}}
+            .bg{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
+            .i{{position:relative;z-index:1;text-align:center;padding:2rem;}}
+            .lg{{font-family:'Bebas Neue',sans-serif;font-size:5rem;color:#4caf82;opacity:0.07;line-height:1;margin-bottom:1rem;}}
+            .t{{font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#1a3a1a;}}
+            .s{{font-size:10px;color:#111a11;letter-spacing:1px;margin-top:6px;}}
+            </style></head><body>
+            <div class='w'><div class='bg'>{_svg_field()}</div>
+            <div class='i'><div class='lg'>NFL</div>
+            <div class='t'>Select a player &amp; run prediction</div>
+            <div class='s'>Beat the Line. Break the Line.</div>
+            </div></div></body></html>"""
+            components.html(ph_nfl, height=420, scrolling=False)
