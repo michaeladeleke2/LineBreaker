@@ -26,6 +26,21 @@ except ImportError:
     def resolve_predictions(*a, **k): return 0
     def get_accuracy_stats(*a, **k): return {'total':0,'correct':0,'accuracy':0.0,'streak':0,'by_target':{},'recent_30d':{'total':0,'correct':0,'accuracy':0.0}}
     def get_recent_predictions(*a, **k): return []
+try:
+    from data.fetch_lines import fetch_player_props, get_line_for_target, fetch_today_odds
+    LINES_ENABLED = True
+except ImportError:
+    LINES_ENABLED = False
+    def fetch_player_props(*a, **k): return {}
+    def get_line_for_target(*a, **k): return (None, False)
+    def fetch_today_odds(): return {}
+
+try:
+    from models.predict import get_matchup_history
+    MATCHUP_ENABLED = True
+except ImportError:
+    MATCHUP_ENABLED = False
+
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
 try:
@@ -146,6 +161,17 @@ div[data-baseweb="select"] > div {
 
 /* Sidebar off */
 [data-testid="stSidebar"] { display:none !important; }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .lb-nav { padding:0 1rem; height:44px; }
+    .lb-logo { font-size:1.4rem; }
+    .lb-ticker-wrap { display:none; }
+    .lb-body { padding:0.8rem 0.8rem 3rem; }
+    .block-container { padding:0 !important; }
+    [data-testid="stTabs"] > div:first-child { padding:0 0.5rem; }
+    button[data-baseweb="tab"] { font-size:0.6rem !important; padding:0.6rem 0.6rem !important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -209,6 +235,20 @@ def _svg_field():
   <line x1="216" y1="0" x2="216" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
   <line x1="288" y1="0" x2="288" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
 </svg>"""
+
+def _dfs_points(pred_dict: dict) -> float:
+    """DraftKings DFS scoring: PTS×1 + REB×1.25 + AST×1.5 + STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5"""
+    try:
+        pts  = float(pred_dict.get("pts",  0) or 0)
+        reb  = float(pred_dict.get("reb",  0) or 0)
+        ast  = float(pred_dict.get("ast",  0) or 0)
+        stl  = float(pred_dict.get("stl",  0) or 0)
+        blk  = float(pred_dict.get("blk",  0) or 0)
+        tov  = float(pred_dict.get("tov",  0) or 0)
+        fg3m = float(pred_dict.get("fg3m", 0) or 0)
+        return round(pts*1 + reb*1.25 + ast*1.5 + stl*2 + blk*2 + tov*(-0.5) + fg3m*0.5, 2)
+    except:
+        return 0.0
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
@@ -478,6 +518,18 @@ with nba_tab:
 
         st.markdown('<span class="ctrl-label">Over/Under Line</span>', unsafe_allow_html=True)
         default_line = DEFAULT_THRESHOLDS.get(sel_target, 10)
+        # Live sportsbook line lookup
+        if LINES_ENABLED:
+            try:
+                live_line, is_live = get_line_for_target(sel_player, sel_target)
+                if live_line is not None:
+                    default_line = live_line
+                    st.markdown(
+                        f'<div style="font-size:0.58rem;color:#4caf82;font-weight:700;letter-spacing:0.1em;margin-bottom:0.3rem;">'
+                        f'📡 Live: {live_line} {"(confirmed)" if is_live else "(estimated)"}</div>',
+                        unsafe_allow_html=True)
+            except:
+                pass
         custom_line  = st.slider("line", 1, 60, value=int(default_line), label_visibility="collapsed")
 
         run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
@@ -876,6 +928,74 @@ with nba_tab:
 
             components.html(html, height=630, scrolling=False)
 
+            # ── Why this prediction? ──────────────────────────────────────────────
+            with st.expander("🔍  Why this prediction?", expanded=False):
+                exp_c1, exp_c2 = st.columns(2)
+
+                with exp_c1:
+                    st.markdown('<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">Top Factors</div>', unsafe_allow_html=True)
+                    if tr.top_factors:
+                        for feat, imp_pct, lbl in tr.top_factors[:6]:
+                            bar_w = min(100, int(imp_pct * 5))
+                            st.markdown(f"""
+                            <div style="margin-bottom:0.5rem;">
+                                <div style="display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;">
+                                    <span style="color:#c8c6c0;">{lbl}</span>
+                                    <span style="color:#f0672a;font-weight:700;">{imp_pct:.1f}%</span>
+                                </div>
+                                <div style="height:3px;background:#1a1a28;border-radius:2px;overflow:hidden;">
+                                    <div style="height:100%;width:{bar_w}%;background:#f0672a;border-radius:2px;"></div>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        st.caption("Feature importance not available for this model.")
+
+                with exp_c2:
+                    st.markdown('<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">vs. This Opponent</div>', unsafe_allow_html=True)
+                    mh = tr.matchup_history
+                    if mh and mh.get("n_games", 0) > 0:
+                        mh_c = "#4caf82" if mh.get("trend","") == "up" else "#e05a5a" if mh.get("trend","") == "down" else "#d4b44a"
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.8rem 1rem;">
+                            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.6rem;text-align:center;">
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};">{mh.get("avg","—")}</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg</div>
+                                </div>
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:#4caf82;">{mh.get("hit_rate_pct","—")}%</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
+                                </div>
+                                <div>
+                                    <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{mh_c};">{mh.get("n_games","—")}</div>
+                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Games</div>
+                                </div>
+                            </div>
+                            <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.5rem;text-align:center;">
+                                Trend: <span style="color:{mh_c};font-weight:700;">{mh.get("trend","—").upper()}</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.caption(f"No historical matchup data vs {sel_opp}.")
+
+                # DFS projection
+                all_preds = {t: ta.predicted_value for t, ta in result.targets.items()}
+                dfs_score = _dfs_points(all_preds)
+                if dfs_score > 0:
+                    st.markdown(f"""
+                    <div style="background:#0d0d15;border:1px solid #1a1a28;border-radius:10px;
+                                padding:0.8rem 1rem;margin-top:0.8rem;display:flex;align-items:center;gap:1rem;">
+                        <div style="font-size:1.2rem;">🎯</div>
+                        <div>
+                            <div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;">DraftKings DFS Projection</div>
+                            <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">{dfs_score} <span style="font-size:0.9rem;color:#252535;">pts</span></div>
+                        </div>
+                        <div style="font-size:0.62rem;color:#1a1a28;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
             # ── Log this prediction ───────────────────────────────────────────────
             log_col, share_col = st.columns(2)
             with log_col:
@@ -920,6 +1040,43 @@ with nba_tab:
                     st.success(f"✅ Added {result.player_name} {target_info['short']} to parlay! ({len(parlay)} legs)")
                 else:
                     st.info("Already in parlay.")
+
+            # ── Player Comparison ─────────────────────────────────────────────────
+            with st.expander("⚖️  Compare with another player", expanded=False):
+                cmp_player = st.selectbox("Compare against", player_options, key="cmp_player",
+                                          index=1 if len(player_options) > 1 else 0)
+                if cmp_player and cmp_player != sel_player:
+                    cmp_row = players_df[players_df["full_name"] == cmp_player]
+                    if not cmp_row.empty:
+                        with st.spinner(f"Predicting {cmp_player}..."):
+                            try:
+                                cmp_result = predict(
+                                    player_id=int(cmp_row.iloc[0]["id"]),
+                                    opponent_team_id=int(o_row["team_id"]),
+                                    opponent_name=sel_opp,
+                                    is_home=(location=="Home"),
+                                    rest_days=rest_days,
+                                    compute_matchup=False,
+                                )
+                                cmp_tr = cmp_result.targets.get(sel_target)
+                                if cmp_tr:
+                                    cmp_c1, cmp_c2 = st.columns(2)
+                                    for col, name, res_tr in [(cmp_c1, sel_player, tr), (cmp_c2, cmp_player, cmp_tr)]:
+                                        with col:
+                                            cmp_conf_c = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(res_tr.confidence_label,"#f0672a")
+                                            st.markdown(f"""
+                                            <div style="background:#0d0d15;border-radius:12px;padding:1rem;text-align:center;">
+                                                <div style="font-size:0.75rem;font-weight:700;color:#e8e6e0;margin-bottom:0.5rem;">{name.split()[-1]}</div>
+                                                <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{pc};line-height:1;">{res_tr.predicted_value}</div>
+                                                <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.3rem;">proj {target_info["short"]}</div>
+                                                <div style="font-size:0.62rem;margin-top:0.5rem;">
+                                                    <span style="color:#2a2a3a;">L5: {res_tr.recent_avg_5} &nbsp;·&nbsp; L10: {res_tr.recent_avg_10}</span>
+                                                </div>
+                                                <div style="font-size:0.6rem;font-weight:700;color:{cmp_conf_c};margin-top:0.3rem;">{res_tr.confidence_label}</div>
+                                            </div>
+                                            """, unsafe_allow_html=True)
+                            except Exception as e:
+                                st.error(f"Comparison error: {e}")
 
             with st.expander("📊  All props — this matchup", expanded=False):
                 rows=[]
@@ -975,6 +1132,26 @@ with picks_tab:
                     f'<span style="background:#1a1a28;color:#252535;border-radius:4px;padding:1px 6px;font-size:9px;">{leg["conf"]}</span>'
                     f'</div>', unsafe_allow_html=True)
 
+            # Correlated parlay warnings
+            same_player_stats = {}
+            for leg in parlay_legs:
+                key = leg["player"]
+                same_player_stats.setdefault(key, []).append(leg["stat"])
+            corr_warnings = []
+            pts_ast_players = [p for p,stats in same_player_stats.items() if "PTS" in stats and "AST" in stats]
+            pts_reb_players = [p for p,stats in same_player_stats.items() if "PTS" in stats and "REB" in stats]
+            for p in pts_ast_players:
+                corr_warnings.append(f"⚠️ **{p}**: PTS+AST are positively correlated — treat as a single correlated leg")
+            for p in pts_reb_players:
+                corr_warnings.append(f"⚠️ **{p}**: PTS+REB are correlated — reduces true independence")
+            if len(parlay_legs) >= 4:
+                corr_warnings.append("⚠️ 4+ leg parlay: hit probability drops significantly — consider 2-3 leg parlays")
+            if conf_counts.get("Low", 0) > 0:
+                corr_warnings.append(f"⚠️ {conf_counts['Low']} Low-confidence leg(s) — weakens overall parlay edge")
+            if corr_warnings:
+                for w in corr_warnings:
+                    st.warning(w)
+
             cl1, cl2 = st.columns(2)
             with cl1:
                 if st.button("🗑 Clear Parlay", key="clear_parlay"):
@@ -999,11 +1176,13 @@ with picks_tab:
     with col_f3:
         qp_n = st.slider("Top N", 5, 25, 10, key="qp_n")
 
-    gen_col, ref_col = st.columns([3, 1])
+    gen_col, ref_col, export_col = st.columns([3, 1, 1])
     with gen_col:
         gen_btn = st.button("⚡ Generate Quick Picks", use_container_width=True, type="primary", key="qp_gen")
     with ref_col:
         clear_btn = st.button("🗑 Clear", use_container_width=True, key="qp_clear")
+    with export_col:
+        export_btn = st.button("📥 CSV", use_container_width=True, key="qp_export", help="Export picks as CSV")
 
     if gen_btn:
         import time as _time
@@ -1015,6 +1194,47 @@ with picks_tab:
         st.session_state.pop("qp_result", None)
         st.session_state.pop("qp_seed", None)
         st.rerun()
+
+    # CSV export
+    if export_btn:
+        qp_export_df = st.session_state.get("qp_result")
+        if qp_export_df is not None and not qp_export_df.empty:
+            import io as _io
+            csv_buf = _io.StringIO()
+            qp_export_df.to_csv(csv_buf, index=False)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv_buf.getvalue(),
+                file_name="linebreaker_picks.csv",
+                mime="text/csv",
+                key="qp_dl_csv",
+            )
+        else:
+            st.info("Generate picks first, then export.")
+
+    # Weekly Best Bets board
+    try:
+        from data.accuracy_tracker import get_weekly_best as _get_weekly_best
+        weekly_best = _get_weekly_best(days=7)
+        if weekly_best:
+            with st.expander(f"🏆 Weekly Best Bets — Top {min(5, len(weekly_best))} (last 7 days)", expanded=False):
+                for i, wb in enumerate(weekly_best[:5], 1):
+                    tinfo_wb = TARGET_DISPLAY.get(wb["target"], {"short": wb["target"]})
+                    icon_wb  = "✅" if wb.get("correct") else "❌" if wb.get("resolved") else "⏳"
+                    st.markdown(f"""
+                    <div style="display:flex;align-items:center;gap:0.8rem;padding:0.5rem 0;border-bottom:1px solid #0d0d15;">
+                        <div style="font-size:0.65rem;font-weight:700;color:#f0672a;min-width:20px;">#{i}</div>
+                        <div style="flex:1;font-size:0.72rem;">
+                            <strong style="color:#e8e6e0;">{wb["player_name"]}</strong>
+                            <span style="color:#2a2a3a;margin-left:6px;">{tinfo_wb.get("short","?")} {wb.get("pick","")} {wb.get("custom_line","")}</span>
+                        </div>
+                        <div style="font-size:0.65rem;color:#4caf82;font-weight:700;">{wb.get("over_prob",0):.1f}%</div>
+                        <div style="font-size:0.65rem;color:#2a2a3a;">{wb.get("confidence","")}</div>
+                        <div>{icon_wb}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+    except Exception:
+        pass
 
     seed = st.session_state.get("qp_seed", 0)
     if seed > 0 and "qp_result" not in st.session_state:
@@ -1205,9 +1425,12 @@ with accuracy_tab:
         acc_c   = "#4caf82" if acc >= 55 else "#d4b44a" if acc >= 50 else "#e05a5a"
         r_acc   = stats["recent_30d"]["accuracy"]
         r_acc_c = "#4caf82" if r_acc >= 55 else "#d4b44a" if r_acc >= 50 else "#e05a5a"
+        u_profit = stats.get("units_profit", 0.0)
+        u_profit_c = "#4caf82" if u_profit >= 0 else "#e05a5a"
+        u_roi    = stats.get("roi", 0.0)
 
         st.markdown(f"""
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.8rem;margin-bottom:1.5rem;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0.8rem;margin-bottom:1rem;">
             <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
                 <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:{acc_c};line-height:1;">{acc:.1f}%</div>
                 <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Overall</div>
@@ -1223,6 +1446,30 @@ with accuracy_tab:
             <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:1rem;text-align:center;">
                 <div style="font-family:'Bebas Neue',sans-serif;font-size:2.5rem;color:#4caf82;line-height:1;">{stats["streak"]}</div>
                 <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Win Streak</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Unit P&L row
+        st.markdown(f"""
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.8rem;margin-bottom:1.5rem;">
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:{u_profit_c};line-height:1;">
+                    {'+' if u_profit >= 0 else ''}{u_profit:.2f}u
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Unit P&amp;L (-110 odds)</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:{u_profit_c};line-height:1;">
+                    {'+' if u_roi >= 0 else ''}{u_roi:.1f}%
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">ROI</div>
+            </div>
+            <div style="background:#0a0a12;border:1px solid #13131f;border-radius:12px;padding:0.8rem 1rem;text-align:center;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">
+                    {stats.get("units_wagered",0):.1f}u
+                </div>
+                <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#2a2a3a;margin-top:4px;">Units Wagered</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -1247,6 +1494,11 @@ with accuracy_tab:
 
         # Recent picks log
         st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Recent Picks</div>', unsafe_allow_html=True)
+        try:
+            from data.accuracy_tracker import manual_resolve as _manual_resolve, add_note as _add_note, get_all_predictions as _get_all_preds
+            ACC_FULL = True
+        except ImportError:
+            ACC_FULL = False
         recent = get_recent_predictions(15)
         for p in recent:
             if p.get("resolved") and p.get("correct") is not None:
@@ -1256,15 +1508,47 @@ with accuracy_tab:
                 icon   = "⏳"
                 actual = "Pending"
             tinfo = TARGET_DISPLAY.get(p["target"], {"short": p["target"]})
+            note_txt = f" · 📝 {p['note']}" if p.get("note") else ""
             st.markdown(f"""
             <div style="display:flex;align-items:center;justify-content:space-between;
                         padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.72rem;">
                 <div>{icon} <strong style="color:#e8e6e0;">{p["player_name"]}</strong>
                     <span style="color:#2a2a3a;margin-left:4px;">{tinfo.get("short","?")} {p["pick"]} {p["custom_line"]}</span>
+                    <span style="color:#1a1a28;">{note_txt}</span>
                 </div>
                 <div style="color:#2a2a3a;">{actual} · {p.get("game_date","")}</div>
             </div>
             """, unsafe_allow_html=True)
+
+        # Manual resolve section
+        if ACC_FULL and recent:
+            with st.expander("📝  Manual resolve / add note", expanded=False):
+                pending_picks = [p for p in recent if not p.get("resolved")]
+                if pending_picks:
+                    resolve_opts = [f"{p['player_name']} — {p['target']} {p['pick']} {p['custom_line']} ({p.get('game_date','')})" for p in pending_picks]
+                    resolve_sel = st.selectbox("Pick to resolve", resolve_opts, key="acc_resolve_sel")
+                    resolve_idx = resolve_opts.index(resolve_sel)
+                    resolve_actual = st.number_input("Actual result", min_value=0.0, step=0.5, key="acc_actual_val")
+                    res_col1, res_col2 = st.columns(2)
+                    with res_col1:
+                        if st.button("✅ Resolve Pick", use_container_width=True, key="acc_resolve_btn"):
+                            try:
+                                _manual_resolve(pending_picks[resolve_idx]["id"], resolve_actual)
+                                st.success("Resolved!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                    note_input = st.text_input("Add note (optional)", key="acc_note_input", placeholder="e.g. DNP, injured, blowout")
+                    with res_col2:
+                        if note_input and st.button("📝 Save Note", use_container_width=True, key="acc_note_btn"):
+                            try:
+                                _add_note(pending_picks[resolve_idx]["id"], note_input)
+                                st.success("Note saved!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                else:
+                    st.info("No pending picks to resolve.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NFL TAB
