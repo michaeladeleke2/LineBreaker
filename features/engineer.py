@@ -247,12 +247,21 @@ def get_feature_cols(df: pd.DataFrame) -> list:
         c for c in ["rest_days", "is_back_to_back", "is_home", "game_number", "def_rating"]
         if c in df.columns
     ]
+    # plus_minus_roll5 is already captured via ROLLING_STAT_COLS; omit it here
     pace_cols = [
-        c for c in ["min_std_l10", "plus_minus_roll5", "blowout_rate_l10",
+        c for c in ["min_std_l10", "blowout_rate_l10",
                      "pace_proxy_l5", "three_pt_rate_l5"]
         if c in df.columns
     ]
-    return rolling + context + pace_cols
+    # Deduplicate while preserving order — duplicate names cause XGBoost to
+    # receive a DataFrame instead of a Series for that column
+    seen = set()
+    out  = []
+    for c in rolling + context + pace_cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
