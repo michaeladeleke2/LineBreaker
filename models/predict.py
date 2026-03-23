@@ -29,11 +29,16 @@ from features.engineer import (
     _get_cached_fm,
 )
 try:
-    from data.bias_correction import get_correction as _get_bias
+    from data.bias_correction import get_correction, update_bias_from_picks
+    BIAS_ENABLED = True
+    _get_bias = get_correction
     _BIAS_ENABLED = True
-except ImportError:
+except Exception:
+    BIAS_ENABLED = False
     _BIAS_ENABLED = False
     def _get_bias(player, stat): return 0.0
+    def get_correction(player, stat): return 0.0
+    def update_bias_from_picks(picks=None): return 0
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
 from data.fetch_data import (
@@ -457,10 +462,15 @@ def predict(
         predicted_value, consistency = _smart_blend(model_pred, recent_raw)
 
         # 1b. Apply learned per-player bias correction (from Underdog pick history)
-        if _BIAS_ENABLED:
-            bias = _get_bias(player_name, target)
-            if bias != 0.0:
-                predicted_value = round(max(predicted_value + bias, 0.0), 1)
+        if BIAS_ENABLED:
+            try:
+                _bias = get_correction(player_name, target)
+                if abs(_bias) > 0.01:
+                    # Cap correction to 30% of predicted value to avoid overcorrecting
+                    _max_shift = abs(predicted_value) * 0.30
+                    predicted_value = round(max(predicted_value - max(-_max_shift, min(_max_shift, _bias)), 0.0), 1)
+            except Exception:
+                pass
 
         # 2. Adjust over_prob based on recent hit-rate vs the line
         adj_over_prob, hit_rate_label = _hit_rate_and_adjustment(

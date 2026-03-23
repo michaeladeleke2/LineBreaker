@@ -72,7 +72,7 @@ def run_retrain(force: bool = False, data_only: bool = False):
     # Step 2: Rebuild feature matrix
     _log("Step 2/3: Rebuilding feature matrix...")
     from features.engineer import build_feature_matrix
-    fm = build_feature_matrix(force_rebuild=True)
+    fm = build_feature_matrix(force_refresh=True)
     _log(f"Feature matrix: {len(fm):,} rows, {len(fm.columns)} columns")
 
     # Step 3: Retrain models

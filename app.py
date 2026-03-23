@@ -2276,17 +2276,17 @@ with ud_tab:
                                    "underdog_picks.csv", "text/csv",
                                    use_container_width=True, key="ud_csv_dl")
 
-            # ── Delete picks ──────────────────────────────────────────────────
+            # ── Delete picks — per-row buttons ────────────────────────────────
             with st.expander("🗑️  Delete a pick"):
-                _del_options = {
-                    f"{_p.get('date','')} · {_p.get('player','')} {_p.get('direction','')} {_p.get('line','')} {_p.get('stat_label','')}": _p["id"]
-                    for _p in _ud_picks
-                }
-                _del_sel = st.selectbox("Select pick to delete", list(_del_options.keys()), key="ud_del_sel")
-                if st.button("🗑️ Delete selected pick", key="ud_del_confirm", type="secondary"):
-                    ud_delete_pick(_del_options[_del_sel])
-                    st.success("Pick deleted.")
-                    st.rerun()
+                for _pidx, _p in enumerate(_ud_picks):
+                    _del_label = f"{_p.get('date','')} · {_p.get('player','')} {_p.get('direction','')} {_p.get('line','')} {_p.get('stat_label','')}"
+                    _dcol1, _dcol2 = st.columns([5, 1])
+                    with _dcol1:
+                        st.caption(_del_label)
+                    with _dcol2:
+                        if st.button("🗑️", key=f"ud_del_{_p['id']}_{_pidx}", help=f"Delete: {_del_label}"):
+                            ud_delete_pick(_p["id"])
+                            st.rerun()
 
         st.divider()
 

@@ -48,6 +48,7 @@ ROLLING_STAT_COLS = [
     "fg3m", "fg3a", "fga", "min",
     "fg_pct", "fg3_pct", "fta", "ft_pct", "usg_pct",
     "pts_reb_ast", "pts_reb", "pts_ast", "reb_ast", "blk_stl",
+    "plus_minus",
 ]
 
 ROLLING_WINDOWS = [5, 10]
@@ -149,6 +150,52 @@ def _add_context_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _add_pace_and_script_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    grp = df.groupby("player_id")
+
+    # 1. Rolling minutes std — consistency of playing time (high std = unreliable minutes)
+    df["min_std_l10"] = (
+        grp["min"].transform(lambda x: x.shift(1).rolling(10, min_periods=3).std().fillna(5.0))
+    )
+
+    # 2. Plus/minus rolling — game script proxy (negative = team losing = fewer late-game mins)
+    if "plus_minus" in df.columns:
+        df["plus_minus_roll5"] = (
+            grp["plus_minus"].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean().fillna(0.0))
+        )
+        # Blowout rate — pct of last 10 games where player's team was losing/winning big
+        df["blowout_rate_l10"] = (
+            grp["plus_minus"].transform(
+                lambda x: x.shift(1).rolling(10, min_periods=3)
+                .apply(lambda v: (abs(v) > 15).mean(), raw=True).fillna(0.3)
+            )
+        )
+    else:
+        df["plus_minus_roll5"] = 0.0
+        df["blowout_rate_l10"] = 0.3
+
+    # 3. Game pace proxy — FGA is the best available pace signal in player gamelogs
+    #    High FGA rolling = fast-paced games = more counting stat opportunities
+    if "fga" in df.columns:
+        df["pace_proxy_l5"] = (
+            grp["fga"].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean().fillna(12.0))
+        )
+    else:
+        df["pace_proxy_l5"] = 12.0
+
+    # 4. Usage consistency — fg3a / fga ratio rolling (3PT-heavy player vs slasher)
+    if "fg3a" in df.columns and "fga" in df.columns:
+        df["three_pt_rate_l5"] = (
+            grp["fg3a"].transform(lambda x: x.shift(1).rolling(5, min_periods=1).mean().fillna(3.0)) /
+            df["pace_proxy_l5"].clip(lower=1.0)
+        )
+    else:
+        df["three_pt_rate_l5"] = 0.25
+
+    return df
+
+
 def _add_opponent_defense(df: pd.DataFrame, defense: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -200,7 +247,12 @@ def get_feature_cols(df: pd.DataFrame) -> list:
         c for c in ["rest_days", "is_back_to_back", "is_home", "game_number", "def_rating"]
         if c in df.columns
     ]
-    return rolling + context
+    pace_cols = [
+        c for c in ["min_std_l10", "plus_minus_roll5", "blowout_rate_l10",
+                     "pace_proxy_l5", "three_pt_rate_l5"]
+        if c in df.columns
+    ]
+    return rolling + context + pace_cols
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -240,6 +292,7 @@ def build_feature_matrix(force_refresh: bool = False) -> pd.DataFrame:
     logs = _add_dd_td_labels(logs)
     logs = _add_rolling_features(logs)
     logs = _add_context_features(logs)
+    logs = _add_pace_and_script_features(logs)
     logs = _add_opponent_defense(logs, defense)
 
     logs = logs.dropna(subset=["pts"]).reset_index(drop=True)
