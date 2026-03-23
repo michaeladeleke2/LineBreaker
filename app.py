@@ -2119,178 +2119,174 @@ with ud_tab:
     if not UNDERDOG_ENABLED:
         st.info("Underdog tracker module not loaded.")
     else:
+        # ── Build lookup helpers from live NBA data ────────────────────────────
+        # player → team abbr
+        _ud_player_team = dict(zip(
+            players_df["full_name"].str.strip(),
+            players_df["team_abbreviation"].fillna(""),
+        )) if not players_df.empty else {}
+        # team abbr → opponent today
+        _ud_team_opp = {}
+        for _g in today_slate:
+            _ud_team_opp[_g["home_abbr"]] = _g["away_abbr"]
+            _ud_team_opp[_g["away_abbr"]] = _g["home_abbr"]
+
+        _all_team_abbrs = sorted(["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN",
+            "DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN",
+            "NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR",
+            "UTA","WSH"])
+
         # ── Stats banner ──────────────────────────────────────────────────────
         _ud_stats = ud_get_stats()
         _ud_total = _ud_stats.get("total", 0)
         _ud_wins  = _ud_stats.get("wins", 0)
         _ud_losses= _ud_stats.get("losses", 0)
         _ud_wr    = _ud_stats.get("win_rate", 0.0)
+        _ud_push  = _ud_stats.get("pushes", 0)
 
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Total Picks", _ud_total)
-        c2.metric("Wins", _ud_wins)
-        c3.metric("Losses", _ud_losses)
-        c4.metric("Win Rate", f"{_ud_wr:.1f}%")
+        _sc1,_sc2,_sc3,_sc4,_sc5 = st.columns(5)
+        _sc1.metric("Total", _ud_total)
+        _sc2.metric("Wins", _ud_wins)
+        _sc3.metric("Losses", _ud_losses)
+        _sc4.metric("Pushes", _ud_push)
+        _sc5.metric("Win Rate", f"{_ud_wr:.1f}%")
 
         st.divider()
 
         # ── Log a new pick ────────────────────────────────────────────────────
-        with st.expander("➕  Log a New Underdog Pick", expanded=_ud_total == 0):
-            st.markdown(_lbl + "Log Pick</div>", unsafe_allow_html=True)
-            _players_df_ud = get_players_for_ui()
+        with st.expander("➕  Log a New Pick", expanded=_ud_total == 0):
+            _players_df_ud   = players_df
             _player_names_ud = sorted(_players_df_ud["full_name"].dropna().unique().tolist())
-            _ud_c1, _ud_c2 = st.columns(2)
-            with _ud_c1:
-                ud_player = st.selectbox(
-                    "Player (type to search)",
-                    options=_player_names_ud,
-                    index=0,
-                    key="ud_player",
-                )
-                ud_stat_lbl= st.selectbox("Stat", [v["label"] for v in TARGET_DISPLAY.values()], key="ud_stat_lbl")
-                ud_stat    = next((k for k,v in TARGET_DISPLAY.items() if v["label"]==ud_stat_lbl), "pts")
-            with _ud_c2:
-                ud_line    = st.number_input("Underdog Line", min_value=0.0, max_value=200.0, value=20.0, step=0.5, key="ud_line")
-                ud_dir     = st.radio("Direction", ["OVER","UNDER"], horizontal=True, key="ud_dir")
-            ud_notes = st.text_input("Notes (optional)", placeholder="e.g. matchup, gut feeling…", key="ud_notes")
-            st.caption("💡 Tip: Run a prediction on NBA Props and click **🐶 Log to Underdog** to auto-fill the model's prediction.")
+            _uc1, _uc2, _uc3 = st.columns(3)
+            with _uc1:
+                ud_player = st.selectbox("Player", options=_player_names_ud, key="ud_player")
+                ud_stat_lbl = st.selectbox("Stat", [v["label"] for v in TARGET_DISPLAY.values()], key="ud_stat_lbl")
+                ud_stat = next((k for k,v in TARGET_DISPLAY.items() if v["label"]==ud_stat_lbl), "pts")
+            with _uc2:
+                # Auto-populate team and opponent
+                _auto_team = _ud_player_team.get(ud_player, "")
+                _auto_opp  = _ud_team_opp.get(_auto_team, "")
+                ud_team = st.selectbox("Team (auto-filled)", [""] + _all_team_abbrs,
+                    index=([""] + _all_team_abbrs).index(_auto_team) if _auto_team in _all_team_abbrs else 0,
+                    key="ud_team")
+                ud_opp  = st.selectbox("Opponent (auto-filled)", [""] + _all_team_abbrs,
+                    index=([""] + _all_team_abbrs).index(_auto_opp) if _auto_opp in _all_team_abbrs else 0,
+                    key="ud_opp")
+            with _uc3:
+                ud_line = st.number_input("Underdog Line", min_value=0.0, max_value=200.0, value=20.0, step=0.5, key="ud_line")
+                ud_dir  = st.radio("Direction", ["OVER","UNDER"], horizontal=True, key="ud_dir")
+            ud_notes = st.text_input("Notes (optional)", placeholder="e.g. back-to-back, hot streak…", key="ud_notes")
+            st.caption("💡 Tip: Click **🐶 Log to Underdog** on any NBA prediction card to auto-fill everything including the model's prediction.")
             if st.button("Log Pick", type="primary", key="ud_log_btn"):
-                _pid = ud_log_pick(
-                    player=ud_player, team="", opponent="",
-                    stat=ud_stat, stat_label=ud_stat_lbl,
-                    line=ud_line, direction=ud_dir,
-                    predicted=None, notes=ud_notes,
-                )
-                st.success(f"✅ Logged pick #{_pid[:8]} — {ud_player} {ud_dir} {ud_line} {ud_stat_lbl}")
+                ud_log_pick(player=ud_player, team=ud_team, opponent=ud_opp,
+                            stat=ud_stat, stat_label=ud_stat_lbl,
+                            line=ud_line, direction=ud_dir, predicted=None, notes=ud_notes)
+                st.success(f"✅ {ud_player} {ud_dir} {ud_line} {ud_stat_lbl} logged!")
                 st.rerun()
 
-        # ── Auto-resolve ──────────────────────────────────────────────────────
-        _r1, _r2 = st.columns([3,1])
-        with _r2:
-            if st.button("🔄 Auto-Resolve from ESPN", use_container_width=True, key="ud_autoresolve"):
-                with st.spinner("Fetching results from ESPN…"):
+        # ── Pick table (editable) ─────────────────────────────────────────────
+        _ud_picks = ud_get_picks(days=90)
+        _hdr1, _hdr2 = st.columns([3,1])
+        with _hdr1:
+            st.markdown(_lbl + f"Pick History ({len(_ud_picks)} picks)</div>", unsafe_allow_html=True)
+        with _hdr2:
+            if st.button("🔄 Auto-Resolve", use_container_width=True, key="ud_autoresolve",
+                         help="Pull final box scores from ESPN and resolve pending picks"):
+                with st.spinner("Fetching from ESPN…"):
                     _resolved = ud_auto_resolve()
                 if _resolved > 0:
-                    update_bias()  # retrain bias correction with new resolved picks
-                    st.success(f"✅ Resolved {_resolved} pick(s) — bias correction updated!")
+                    update_bias()
+                    st.success(f"✅ Resolved {_resolved} pick(s)!")
                 else:
-                    st.info("No new picks resolved (games may not be final yet).")
+                    st.info("No new picks resolved yet — games may still be in progress.")
                 st.rerun()
-        with _r1:
-            st.markdown(_lbl + "Pick History</div>", unsafe_allow_html=True)
 
-        # ── Pick table ────────────────────────────────────────────────────────
-        _ud_picks = ud_get_picks(days=90)
         if not _ud_picks:
-            st.info("No picks logged yet. Add your first Underdog pick above!")
+            st.info("No picks yet. Log your first pick above or click 🐶 Log to Underdog on a prediction card.")
         else:
-            _outcome_icon = {"W":"✅","L":"❌","P":"➖",None:"⏳"}
+            _outcome_icon = {"W": "✅ W", "L": "❌ L", "P": "➖ P", None: "⏳"}
 
-            # ── Per-pick rows with edit + delete ──────────────────────────────
-            _all_team_abbrs = sorted(["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN",
-                "DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN",
-                "NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR",
-                "UTA","WSH"])
-
-            for _up in _ud_picks:
-                _pid   = _up["id"]
-                _icon  = _outcome_icon.get(_up.get("outcome"), "⏳")
-                _team  = _up.get("team","") or ""
-                _opp   = _up.get("opponent","") or ""
-                _label = f"{_icon} **{_up['player']}** — {_up.get('stat_label',_up.get('stat',''))} {_up['direction']} {_up['line']}"
-                if _team or _opp:
-                    _label += f"  `{_team} vs {_opp}`"
-
-                with st.expander(_label, expanded=False):
-                    _e1, _e2, _e3 = st.columns(3)
-                    with _e1:
-                        _new_team = st.selectbox(
-                            "Team", [""] + _all_team_abbrs,
-                            index=([""] + _all_team_abbrs).index(_team) if _team in _all_team_abbrs else 0,
-                            key=f"ed_team_{_pid}")
-                        _new_opp = st.selectbox(
-                            "Opponent", [""] + _all_team_abbrs,
-                            index=([""] + _all_team_abbrs).index(_opp) if _opp in _all_team_abbrs else 0,
-                            key=f"ed_opp_{_pid}")
-                    with _e2:
-                        _new_line = st.number_input(
-                            "Line", min_value=0.0, max_value=200.0,
-                            value=float(_up.get("line") or 0),
-                            step=0.5, key=f"ed_line_{_pid}")
-                        _new_dir = st.radio(
-                            "Direction", ["OVER","UNDER"],
-                            index=0 if _up.get("direction","OVER")=="OVER" else 1,
-                            horizontal=True, key=f"ed_dir_{_pid}")
-                    with _e3:
-                        _cur_actual = float(_up["actual"]) if _up.get("actual") is not None else 0.0
-                        _new_actual = st.number_input(
-                            "Actual result", min_value=0.0, max_value=200.0,
-                            value=_cur_actual, step=0.5, key=f"ed_actual_{_pid}")
-                        _new_notes = st.text_input(
-                            "Notes", value=_up.get("notes","") or "",
-                            key=f"ed_notes_{_pid}")
-
-                    _save_col, _del_col = st.columns([3,1])
-                    with _save_col:
-                        if st.button("💾 Save changes", key=f"ed_save_{_pid}", use_container_width=True):
-                            _upd = dict(
-                                team=_new_team, opponent=_new_opp,
-                                line=_new_line, direction=_new_dir,
-                                notes=_new_notes,
-                            )
-                            if _new_actual > 0:
-                                _upd["actual"] = _new_actual
-                            ud_update_pick(_pid, **_upd)
-                            update_bias()
-                            st.success("✅ Pick updated!")
-                            st.rerun()
-                    with _del_col:
-                        if st.button("🗑️ Delete", key=f"ed_del_{_pid}",
-                                     use_container_width=True, type="secondary"):
-                            ud_delete_pick(_pid)
-                            st.rerun()
-
-            # ── Summary table ─────────────────────────────────────────────────
-            st.divider()
-            _ud_rows = []
-            for p in _ud_picks:
-                _ud_rows.append({
-                    "Date":      p.get("date",""),
-                    "Player":    p.get("player",""),
-                    "Team":      p.get("team","") or "—",
-                    "Opponent":  p.get("opponent","") or "—",
-                    "Stat":      p.get("stat_label", p.get("stat","")),
-                    "Line":      p.get("line",""),
-                    "Dir":       p.get("direction",""),
-                    "Model":     p.get("predicted","") or "—",
-                    "Actual":    p.get("actual","") or "—",
-                    "Result":    _outcome_icon.get(p.get("outcome"), "⏳"),
+            # Build display + editable table
+            _editor_rows = []
+            _pick_ids    = []
+            for _p in _ud_picks:
+                _pick_ids.append(_p["id"])
+                _editor_rows.append({
+                    "Result":   _outcome_icon.get(_p.get("outcome"), "⏳"),
+                    "Date":     _p.get("date",""),
+                    "Player":   _p.get("player",""),
+                    "Team":     _p.get("team","") or "",
+                    "Opponent": _p.get("opponent","") or "",
+                    "Stat":     _p.get("stat_label", _p.get("stat","")),
+                    "Line":     float(_p.get("line") or 0),
+                    "Dir":      _p.get("direction","OVER"),
+                    "Model":    float(_p["predicted"]) if _p.get("predicted") is not None else None,
+                    "Actual":   float(_p["actual"])    if _p.get("actual")    is not None else None,
+                    "Notes":    _p.get("notes","") or "",
                 })
-            st.dataframe(pd.DataFrame(_ud_rows), use_container_width=True, hide_index=True)
 
-            # ── Manage / delete picks ─────────────────────────────────────────
-            with st.expander(f"🗑️  Manage Picks — delete any entry ({len(_ud_picks)} total)"):
-                st.caption("Click 🗑️ to permanently remove a pick (e.g. if you entered the wrong info).")
-                for _mp in _ud_picks:
-                    _outcome_badge = {"W": "✅ W", "L": "❌ L", "P": "➖ P"}.get(_mp.get("outcome"), "⏳ Pending")
-                    _dm1, _dm2 = st.columns([5, 1])
-                    with _dm1:
-                        _mp_label = (
-                            f"{_mp.get('date','')}  ·  **{_mp.get('player','')}**  "
-                            f"{_mp.get('direction','')} {_mp.get('line','')} "
-                            f"{_mp.get('stat_label', _mp.get('stat',''))}  ·  {_outcome_badge}"
-                        )
-                        st.markdown(_mp_label)
-                    with _dm2:
-                        if st.button("🗑️", key=f"ud_del_{_mp['id']}",
-                                     help="Delete this pick permanently"):
-                            ud_delete_pick(_mp["id"])
-                            st.success("Pick deleted.")
-                            st.rerun()
+            _editor_df = pd.DataFrame(_editor_rows)
+            _edited = st.data_editor(
+                _editor_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "Result":   st.column_config.TextColumn("Result", disabled=True, width="small"),
+                    "Date":     st.column_config.TextColumn("Date",   disabled=True, width="small"),
+                    "Player":   st.column_config.TextColumn("Player", disabled=True),
+                    "Team":     st.column_config.SelectboxColumn("Team",     options=_all_team_abbrs, width="small"),
+                    "Opponent": st.column_config.SelectboxColumn("Opponent", options=_all_team_abbrs, width="small"),
+                    "Stat":     st.column_config.TextColumn("Stat",   disabled=True),
+                    "Line":     st.column_config.NumberColumn("Line",   min_value=0.0, max_value=200.0, step=0.5, format="%.1f"),
+                    "Dir":      st.column_config.SelectboxColumn("Dir", options=["OVER","UNDER"], width="small"),
+                    "Model":    st.column_config.NumberColumn("Model",  min_value=0.0, max_value=200.0, step=0.5, format="%.1f", disabled=True),
+                    "Actual":   st.column_config.NumberColumn("Actual", min_value=0.0, max_value=200.0, step=0.5, format="%.1f"),
+                    "Notes":    st.column_config.TextColumn("Notes"),
+                },
+                key="ud_editor",
+            )
 
-            # CSV export
-            _ud_csv = pd.DataFrame(_ud_rows).to_csv(index=False)
-            st.download_button("⬇️ Export CSV", _ud_csv, "underdog_picks.csv", "text/csv", key="ud_csv_dl")
+            # Detect changes and save
+            _changes_made = not _edited.equals(_editor_df)
+            _save_col, _csv_col = st.columns([1,1])
+            with _save_col:
+                if st.button("💾 Save all changes", type="primary", use_container_width=True,
+                             disabled=not _changes_made, key="ud_save_all"):
+                    _saved = 0
+                    for _i, (_row, _pid) in enumerate(zip(_edited.itertuples(index=False), _pick_ids)):
+                        _orig = _editor_rows[_i]
+                        _upd = {}
+                        if _row.Team     != _orig["Team"]:     _upd["team"]      = _row.Team or ""
+                        if _row.Opponent != _orig["Opponent"]: _upd["opponent"]  = _row.Opponent or ""
+                        if _row.Line     != _orig["Line"]:     _upd["line"]      = _row.Line
+                        if _row.Dir      != _orig["Dir"]:      _upd["direction"] = _row.Dir
+                        if _row.Actual   != _orig["Actual"] and _row.Actual is not None:
+                            _upd["actual"] = _row.Actual
+                        if _row.Notes    != _orig["Notes"]:    _upd["notes"]     = _row.Notes or ""
+                        if _upd:
+                            ud_update_pick(_pid, **_upd)
+                            _saved += 1
+                    if _saved:
+                        update_bias()
+                        st.success(f"✅ Saved {_saved} change(s)!")
+                        st.rerun()
+            with _csv_col:
+                st.download_button("⬇️ Export CSV", _editor_df.to_csv(index=False),
+                                   "underdog_picks.csv", "text/csv",
+                                   use_container_width=True, key="ud_csv_dl")
+
+            # ── Delete picks ──────────────────────────────────────────────────
+            with st.expander("🗑️  Delete a pick"):
+                _del_options = {
+                    f"{_p.get('date','')} · {_p.get('player','')} {_p.get('direction','')} {_p.get('line','')} {_p.get('stat_label','')}": _p["id"]
+                    for _p in _ud_picks
+                }
+                _del_sel = st.selectbox("Select pick to delete", list(_del_options.keys()), key="ud_del_sel")
+                if st.button("🗑️ Delete selected pick", key="ud_del_confirm", type="secondary"):
+                    ud_delete_pick(_del_options[_del_sel])
+                    st.success("Pick deleted.")
+                    st.rerun()
 
         st.divider()
 
