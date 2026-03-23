@@ -92,17 +92,6 @@ _favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
 st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
 
-# ── Splash overlay — fades out automatically after 1.6s ──────────────────────
-if _LOGO_B64:
-    st.markdown(
-        f'<div id="lb-splash">'
-        f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
-        f'<div class="sp-sub">Beat the Line. Break the Line.</div>'
-        f'<div class="sp-bar"></div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap');
@@ -233,6 +222,33 @@ div[data-baseweb="select"] > div {
 }
 </style>
 """, unsafe_allow_html=True)
+
+# ── Splash — injected AFTER the CSS block so animations are already defined ───
+if _LOGO_B64:
+    st.markdown(
+        f'<style>'
+        f'#lb-splash{{position:fixed;inset:0;background:#080810;z-index:99999;'
+        f'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.2rem;'
+        f'animation:splashFade 0.5s ease-out 2s forwards;pointer-events:none;}}'
+        f'#lb-splash img{{height:160px;width:auto;object-fit:contain;'
+        f'animation:splashScale 0.8s cubic-bezier(0.22,1,0.36,1) 0.05s both;}}'
+        f'#lb-splash .sp-sub{{font-size:0.62rem;font-weight:700;letter-spacing:0.28em;'
+        f'text-transform:uppercase;color:#f0672a;opacity:0;'
+        f'animation:splashFadeIn 0.5s ease 0.7s forwards;}}'
+        f'#lb-splash .sp-bar{{width:0;height:2px;background:#f0672a;border-radius:2px;opacity:0;'
+        f'animation:splashBar 0.7s ease 1s forwards;}}'
+        f'@keyframes splashScale{{from{{transform:scale(0.75);opacity:0}}to{{transform:scale(1);opacity:1}}}}'
+        f'@keyframes splashFadeIn{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}'
+        f'@keyframes splashBar{{from{{width:0;opacity:0}}to{{width:60px;opacity:0.6}}}}'
+        f'@keyframes splashFade{{from{{opacity:1}}to{{opacity:0;visibility:hidden}}}}'
+        f'</style>'
+        f'<div id="lb-splash">'
+        f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
+        f'<div class="sp-sub">Beat the Line. Break the Line.</div>'
+        f'<div class="sp-bar"></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _lineup_badge(lineup_info):
