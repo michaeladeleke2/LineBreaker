@@ -28,6 +28,17 @@ from features.engineer import (
     DEFAULT_THRESHOLDS,
     _get_cached_fm,
 )
+try:
+    from data.bias_correction import get_correction, update_bias_from_picks
+    BIAS_ENABLED = True
+    _get_bias = get_correction
+    _BIAS_ENABLED = True
+except Exception:
+    BIAS_ENABLED = False
+    _BIAS_ENABLED = False
+    def _get_bias(player, stat): return 0.0
+    def get_correction(player, stat): return 0.0
+    def update_bias_from_picks(picks=None): return 0
 from data.fetch_injuries import fetch_injury_report, get_player_injury
 from data.fetch_lineups import fetch_all_lineups, get_player_lineup_status
 from data.fetch_data import (
@@ -61,6 +72,9 @@ class TargetResult:
     consistency_score: float = 1.0   # 0 (volatile) → 1 (very consistent)
     hit_rate_l5:       str   = ""    # e.g. "4/5 HIT" — recent hit rate vs line
     bet_size:          str   = "1u"  # Recommended bet size (1u / 2u / 3u)
+    # Explainability + matchup context
+    top_factors:      list  = field(default_factory=list)  # [(feature_name, importance_pct, human_label), ...]
+    matchup_history:  dict  = field(default_factory=dict)
 
 
 @dataclass
@@ -272,6 +286,106 @@ def _bet_size(confidence: str, edge_norm: float) -> str:
     return "1u"
 
 
+# ── Matchup history ───────────────────────────────────────────────────────────
+
+def get_matchup_history(
+    player_id:           int,
+    opponent_name:       str,
+    target:              str,
+    preloaded_gamelogs:  pd.DataFrame = None,
+) -> dict:
+    """
+    Look up player's historical stats vs a specific opponent.
+
+    Returns
+    -------
+    {
+        "games": int,           # number of games vs this opponent
+        "avg": float,           # average value of target stat
+        "hit_rate": float,      # fraction of games above default threshold
+        "threshold": float,     # threshold used
+        "recent": list,         # last 5 values (chronological)
+        "trend": str,           # "improving", "declining", or "steady"
+    }
+    """
+    from features.engineer import COMBO_TARGETS, DEFAULT_THRESHOLDS
+
+    if preloaded_gamelogs is not None:
+        logs = preloaded_gamelogs[preloaded_gamelogs["player_id"] == player_id].copy()
+    else:
+        logs = get_player_gamelogs(player_id)
+
+    empty = {"games": 0, "avg": 0.0, "hit_rate": 0.0, "threshold": 0.0, "recent": [], "trend": ""}
+
+    if logs.empty or "matchup" not in logs.columns:
+        return empty
+
+    # Filter games vs this opponent (matchup string contains opponent abbr)
+    opp_games = logs[logs["matchup"].str.contains(opponent_name, case=False, na=False)]
+
+    if opp_games.empty:
+        return empty
+
+    # Compute stat values
+    if target in COMBO_TARGETS:
+        parts = COMBO_TARGETS[target]
+        available = [p for p in parts if p in opp_games.columns]
+        if not available:
+            return empty
+        vals = opp_games[available].apply(pd.to_numeric, errors="coerce").sum(axis=1).dropna()
+    elif target in opp_games.columns:
+        vals = pd.to_numeric(opp_games[target], errors="coerce").dropna()
+    else:
+        return empty
+
+    if len(vals) == 0:
+        return empty
+
+    threshold = DEFAULT_THRESHOLDS.get(target, float(vals.mean()) if len(vals) > 0 else 10)
+    recent = vals.tail(5).tolist()
+
+    # Trend: compare first half vs second half of games
+    trend = "steady"
+    if len(vals) >= 6:
+        first_half  = vals.iloc[:len(vals) // 2].mean()
+        second_half = vals.iloc[len(vals) // 2:].mean()
+        if second_half > first_half * 1.1:
+            trend = "improving"
+        elif second_half < first_half * 0.9:
+            trend = "declining"
+
+    return {
+        "games":     len(vals),
+        "avg":       round(float(vals.mean()), 1),
+        "hit_rate":  round(float((vals > threshold).mean()), 2),
+        "threshold": threshold,
+        "recent":    [round(v, 1) for v in recent],
+        "trend":     trend,
+    }
+
+
+# ── Feature explainability label map ──────────────────────────────────────────
+
+FEAT_LABELS = {
+    "pts_roll5":       "Pts L5",
+    "pts_roll10":      "Pts L10",
+    "reb_roll5":       "Reb L5",
+    "reb_roll10":      "Reb L10",
+    "ast_roll5":       "Ast L5",
+    "ast_roll10":      "Ast L10",
+    "fga_roll5":       "FGA L5",
+    "fga_roll10":      "FGA L10",
+    "fg3m_roll5":      "3PM L5",
+    "fg3m_roll10":     "3PM L10",
+    "min_roll5":       "Min L5",
+    "min_roll10":      "Min L10",
+    "def_rating":      "Opp Defense",
+    "is_home":         "Home/Away",
+    "rest_days":       "Rest Days",
+    "is_back_to_back": "Back-to-Back",
+}
+
+
 # ── Core prediction ───────────────────────────────────────────────────────────
 
 def predict(
@@ -287,6 +401,7 @@ def predict(
     preloaded_fm:               pd.DataFrame = None,
     preloaded_players_df:       pd.DataFrame = None,
     preloaded_gamelogs:         pd.DataFrame = None,
+    compute_matchup:      bool  = True,
 ) -> PredictionResult:
     """
     Generate predictions across all (or specified) stat targets
@@ -346,6 +461,17 @@ def predict(
         # 1. Blend model prediction with exponentially-weighted recent form
         predicted_value, consistency = _smart_blend(model_pred, recent_raw)
 
+        # 1b. Apply learned per-player bias correction (from Underdog pick history)
+        if BIAS_ENABLED:
+            try:
+                _bias = get_correction(player_name, target)
+                if abs(_bias) > 0.01:
+                    # Cap correction to 30% of predicted value to avoid overcorrecting
+                    _max_shift = abs(predicted_value) * 0.30
+                    predicted_value = round(max(predicted_value - max(-_max_shift, min(_max_shift, _bias)), 0.0), 1)
+            except Exception:
+                pass
+
         # 2. Adjust over_prob based on recent hit-rate vs the line
         adj_over_prob, hit_rate_label = _hit_rate_and_adjustment(
             raw_over_prob, recent_raw, threshold)
@@ -359,6 +485,27 @@ def predict(
         mae      = target_meta.get("reg_cv_mae", 1.0) or 1.0
         edge_n   = abs(predicted_value - threshold) / mae
         bet_sz   = _bet_size(confidence, edge_n)
+
+        # 5. Feature explainability — top 3 drivers from saved metadata
+        top_feats_raw = target_meta.get("top_features_reg", {})
+        total_imp = sum(top_feats_raw.values()) or 1
+        top_factors = [
+            (feat, round(imp / total_imp * 100, 1), FEAT_LABELS.get(feat, feat.replace("_", " ").title()))
+            for feat, imp in list(top_feats_raw.items())[:3]
+        ]
+
+        # 6. Matchup history — only for focused (≤3 target) requests
+        matchup_hist: dict = {}
+        if compute_matchup and len(targets) <= 3:
+            try:
+                matchup_hist = get_matchup_history(
+                    player_id        = player_id,
+                    opponent_name    = opponent_name,
+                    target           = target,
+                    preloaded_gamelogs = preloaded_gamelogs,
+                )
+            except Exception:
+                matchup_hist = {}
 
         target_results[target] = TargetResult(
             target            = target,
@@ -374,6 +521,8 @@ def predict(
             consistency_score = consistency,
             hit_rate_l5       = hit_rate_label,
             bet_size          = bet_sz,
+            top_factors       = top_factors,
+            matchup_history   = matchup_hist,
         )
 
     # ── Injury + lineup adjustment ───────────────────────────────────────────
@@ -425,6 +574,8 @@ def predict(
                 consistency_score = tr.consistency_score,
                 hit_rate_l5       = tr.hit_rate_l5,
                 bet_size          = _bet_size(conf_i, edge_ni),
+                top_factors       = tr.top_factors,
+                matchup_history   = tr.matchup_history,
             )
 
     return PredictionResult(

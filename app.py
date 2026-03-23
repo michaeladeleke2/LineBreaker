@@ -2,7 +2,7 @@
 linebreaker/app.py — LineBreaker: NBA & NFL Prop Predictor
 Run: streamlit run app.py
 """
-import sys, warnings, math
+import sys, warnings, math, base64
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -11,6 +11,14 @@ import streamlit.components.v1 as components
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parent
 sys.path.append(str(ROOT))
+
+# ── Logo (base64 embed for reliable Streamlit serving) ────────────────────────
+def _logo_b64() -> str:
+    _p = ROOT / "assets" / "logo.png"
+    if _p.exists():
+        return base64.b64encode(_p.read_bytes()).decode()
+    return ""
+_LOGO_B64 = _logo_b64()
 
 from models.predict import predict, get_players_for_ui, get_teams_for_ui, get_available_targets, TARGET_DISPLAY, TARGET_GROUPS
 from features.engineer import DEFAULT_THRESHOLDS, COMBO_TARGETS
@@ -34,6 +42,39 @@ except ImportError:
     def fetch_player_props(*a, **k): return {}
     def get_line_for_target(*a, **k): return (None, False)
     def fetch_today_odds(): return {}
+
+try:
+    from data.accuracy_tracker import (
+        auto_resolve_from_espn, get_accuracy_trend,
+        get_all_predictions as get_all_preds_full,
+    )
+    from data.fetch_boxscores import get_team_defensive_rankings
+    AUTORESOLVE_ENABLED = True
+except ImportError:
+    AUTORESOLVE_ENABLED = False
+    def auto_resolve_from_espn(): return 0
+    def get_accuracy_trend(*a, **k): return []
+    def get_all_preds_full(): return []
+    def get_team_defensive_rankings(*a): return {}
+
+try:
+    from data.underdog_tracker import (
+        update_pick as ud_update_pick,
+        log_pick as ud_log_pick,
+        resolve_pick as ud_resolve_pick,
+        auto_resolve_all as ud_auto_resolve,
+        get_picks as ud_get_picks,
+        get_stats as ud_get_stats,
+        delete_pick as ud_delete_pick,
+    )
+    from data.bias_correction import (
+        update_bias_from_picks as update_bias,
+        get_all_corrections,
+        get_player_bias_summary,
+    )
+    UNDERDOG_ENABLED = True
+except ImportError:
+    UNDERDOG_ENABLED = False
 
 try:
     from models.predict import get_matchup_history
@@ -66,8 +107,45 @@ TEAM_COLORS = {
 
 def _headshot(pid): return f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
 
-st.set_page_config(page_title="LineBreaker", page_icon="🏀",
+_favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
+st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
+
+# ── Splash — CSS-only, renders in main doc so it appears immediately ────────────
+if _LOGO_B64:
+    st.markdown(f"""
+<style>
+#lb-splash {{
+    position:fixed;inset:0;background:#080810;z-index:99999;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:1.8rem;pointer-events:none;
+    animation:lbSplashOut 0.7s ease 3.5s forwards;
+}}
+#lb-splash img {{
+    height:260px;width:auto;object-fit:contain;
+    filter:drop-shadow(0 0 40px rgba(240,103,42,0.35));
+    animation:lbSplashScale 0.9s cubic-bezier(0.22,1,0.36,1) 0.05s both;
+}}
+#lb-splash .sp-tagline {{
+    font-family:'Inter',sans-serif;font-size:0.7rem;font-weight:700;
+    letter-spacing:0.32em;text-transform:uppercase;color:#f0672a;
+    opacity:0;animation:lbSplashFade 0.5s ease 0.75s forwards;
+}}
+#lb-splash .sp-bar {{
+    width:0;height:2px;background:linear-gradient(90deg,transparent,#f0672a,transparent);
+    border-radius:2px;opacity:0;animation:lbSplashBar 0.8s ease 1.1s forwards;
+}}
+@keyframes lbSplashOut   {{ 0%{{opacity:1;visibility:visible}} 100%{{opacity:0;visibility:hidden}} }}
+@keyframes lbSplashScale {{ from{{transform:scale(0.7);opacity:0}} to{{transform:scale(1);opacity:1}} }}
+@keyframes lbSplashFade  {{ from{{opacity:0;transform:translateY(10px)}} to{{opacity:1;transform:translateY(0)}} }}
+@keyframes lbSplashBar   {{ from{{width:0;opacity:0}} to{{width:80px;opacity:0.8}} }}
+</style>
+<div id="lb-splash">
+    <img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker">
+    <div class="sp-tagline">Beat the Line. Break the Line.</div>
+    <div class="sp-bar"></div>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -85,21 +163,51 @@ section[data-testid="stMain"] { background:#080810 !important; }
 /* Nav */
 .lb-nav {
     display:flex; align-items:center; justify-content:space-between;
-    background:#080810; border-bottom:1px solid #13131f;
-    padding:0 2rem; height:52px; position:sticky; top:0; z-index:100;
+    background:#080810; border-bottom:1px solid #1a1a2e;
+    padding:0 2rem; height:96px; position:sticky; top:0; z-index:100;
 }
-.lb-logo { font-family:'Bebas Neue',sans-serif; font-size:1.9rem; color:#f0672a; letter-spacing:0.05em; }
+.lb-logo { display:flex; align-items:center; gap:0.5rem; }
+.lb-logo img {
+    height:88px; width:auto; object-fit:contain; display:block;
+    filter:drop-shadow(0 2px 12px rgba(240,103,42,0.4));
+    transition:filter 0.2s ease;
+}
+.lb-logo img:hover { filter:drop-shadow(0 2px 20px rgba(240,103,42,0.7)); }
+.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:2.4rem; color:#f0672a; letter-spacing:0.05em; }
+
+/* Splash screen */
+#lb-splash {
+    position:fixed; inset:0; background:#080810; z-index:99999;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1.5rem;
+    animation: splashFade 0.6s ease-out 1.6s forwards;
+    pointer-events:none;
+}
+#lb-splash img { height:140px; width:auto; object-fit:contain;
+    animation: splashScale 0.7s cubic-bezier(0.22,1,0.36,1) 0.1s both; }
+#lb-splash .sp-sub {
+    font-size:0.62rem; font-weight:700; letter-spacing:0.28em; text-transform:uppercase;
+    color:#f0672a; opacity:0;
+    animation: splashFadeIn 0.5s ease 0.6s forwards;
+}
+#lb-splash .sp-bar {
+    width:60px; height:2px; background:#f0672a; border-radius:2px; opacity:0;
+    animation: splashBar 0.8s ease 0.9s forwards;
+}
+@keyframes splashScale  { from{transform:scale(0.8);opacity:0} to{transform:scale(1);opacity:1} }
+@keyframes splashFadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+@keyframes splashBar    { from{width:0;opacity:0} to{width:60px;opacity:0.6} }
+@keyframes splashFade   { from{opacity:1;pointer-events:none} to{opacity:0;pointer-events:none;visibility:hidden} }
 .lb-ticker-wrap { flex:1; overflow:hidden; margin:0 1.5rem;
     mask-image:linear-gradient(90deg,transparent,black 8%,black 92%,transparent); }
 .lb-ticker-track { display:inline-flex; gap:2rem; white-space:nowrap; animation:tick 40s linear infinite; }
 @keyframes tick { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
-.lb-tick { font-size:0.68rem; font-weight:500; color:#252535; letter-spacing:0.05em; }
+.lb-tick { font-size:0.68rem; font-weight:500; color:#3a3a55; letter-spacing:0.05em; }
 .lb-tick .h { color:#f0672a; font-weight:700; }
 .lb-tick .u { color:#4caf82; font-weight:700; }
 .lb-nav-right { display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
 .lb-badge { font-size:0.58rem; font-weight:700; letter-spacing:0.14em; text-transform:uppercase;
     color:#f0672a; border:1px solid rgba(240,103,42,0.35); border-radius:4px; padding:0.18rem 0.5rem; }
-.lb-tagline { font-size:0.48rem; font-weight:600; letter-spacing:0.18em; text-transform:uppercase; color:#1a1a28; }
+.lb-tagline { font-size:0.48rem; font-weight:600; letter-spacing:0.18em; text-transform:uppercase; color:#2a2a3a; }
 
 /* Tabs flush */
 [data-testid="stTabs"] { margin-top:0 !important; }
@@ -164,8 +272,9 @@ div[data-baseweb="select"] > div {
 
 /* Mobile responsive */
 @media (max-width: 768px) {
-    .lb-nav { padding:0 1rem; height:44px; }
-    .lb-logo { font-size:1.4rem; }
+    .lb-nav { padding:0 1rem; height:60px; }
+    .lb-logo img { height:52px; }
+    .lb-logo span { font-size:1.6rem; }
     .lb-ticker-wrap { display:none; }
     .lb-body { padding:0.8rem 0.8rem 3rem; }
     .block-container { padding:0 !important; }
@@ -236,6 +345,22 @@ def _svg_field():
   <line x1="288" y1="0" x2="288" y2="200" stroke="#4caf82" stroke-width="0.5" opacity="0.5"/>
 </svg>"""
 
+def _kelly(over_prob: float, edge_abs: float, line: float, bankroll: float = 1000.0) -> dict:
+    """Kelly criterion bet sizing. Returns {fraction, units, dollars}."""
+    try:
+        p = max(0.01, min(0.99, over_prob / 100))
+        q = 1 - p
+        # Standard -110 odds → decimal 1.909
+        b = 0.909
+        kelly_f = max(0.0, (b * p - q) / b)
+        # Quarter-Kelly for safety
+        safe_f  = kelly_f * 0.25
+        dollars = round(safe_f * bankroll, 2)
+        units   = round(safe_f * bankroll / 100, 2)  # assume 1u = $100
+        return {"fraction": round(safe_f * 100, 1), "dollars": dollars, "units": units}
+    except Exception:
+        return {"fraction": 0.0, "dollars": 0.0, "units": 0.0}
+
 def _dfs_points(pred_dict: dict) -> float:
     """DraftKings DFS scoring: PTS×1 + REB×1.25 + AST×1.5 + STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5"""
     try:
@@ -266,7 +391,7 @@ def load_injuries():
     try: return fetch_injury_report()
     except: return pd.DataFrame()
 
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=120)
 def load_lineups():
     try: return fetch_all_lineups()
     except: return pd.DataFrame()
@@ -349,6 +474,16 @@ else:
 player_options = players_df["full_name"].tolist()
 team_options   = teams_df["team_abbreviation"].tolist()
 
+# Load defensive rankings (non-blocking)
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_def_rankings():
+    try:
+        fm_path = ROOT / "data" / "cache" / "feature_matrix.csv"
+        return get_team_defensive_rankings(fm_path)
+    except Exception:
+        return {}
+DEF_RANKINGS = load_def_rankings()
+
 stat_options, stat_map = [], {}
 for group in TARGET_GROUPS:
     for target, info in TARGET_DISPLAY.items():
@@ -416,8 +551,13 @@ ti  = "".join(f'<span class="lb-tick">{n}&nbsp;<span class="{c}">{s}</span></spa
 td  = ti * 2
 
 # ── Nav ───────────────────────────────────────────────────────────────────────
+_logo_html = (
+    f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
+    if _LOGO_B64 else
+    '<span>LineBreaker</span>'
+)
 st.markdown(f"""<div class="lb-nav">
-    <div class="lb-logo">LineBreaker</div>
+    <div class="lb-logo">{_logo_html}</div>
     <div class="lb-ticker-wrap"><div class="lb-ticker-track">{td}</div></div>
     <div class="lb-nav-right">
         <div class="lb-badge">NBA &amp; NFL Props</div>
@@ -426,7 +566,7 @@ st.markdown(f"""<div class="lb-nav">
 </div>""", unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-nba_tab, picks_tab, accuracy_tab, nfl_tab = st.tabs(["🏀  NBA Props", "⚡  Quick Picks", "📈  Accuracy", "🏈  NFL Props"])
+nba_tab, picks_tab, accuracy_tab, ud_tab, nfl_tab = st.tabs(["🏀  NBA Props", "⚡  Quick Picks", "📈  Accuracy", "🐶  Underdog", "🏈  NFL Props"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 with nba_tab:
@@ -534,6 +674,12 @@ with nba_tab:
 
         run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
 
+        # Clear cached result when player / stat / opponent changes
+        _cache_key = f"{sel_player}|{sel_target}|{sel_opp}|{location}"
+        if st.session_state.get("_pred_cache_key") != _cache_key:
+            st.session_state.pop("_pred_result", None)
+            st.session_state["_pred_cache_key"] = _cache_key
+
         # ── System buttons ────────────────────────────────────────────────────
         st.divider()
         st.caption("SYSTEM")
@@ -572,19 +718,57 @@ with nba_tab:
                     except Exception as e:
                         st.error(f"❌ {e}")
 
-            if st.button("🤖 Retrain", use_container_width=True,
-                         help="Retrain all models (~15 min, runs in background)"):
+            if st.button("🤖 Retrain Models", use_container_width=True,
+                         help="Retrain all 16 XGBoost models with latest data (~15 min)"):
                 try:
-                    import subprocess
-                    retrain_path = str(ROOT / "retrain.py")
+                    import subprocess as _sp
+                    _log_path = ROOT / "logs" / "retrain.log"
                     (ROOT / "logs").mkdir(exist_ok=True)
-                    subprocess.Popen(
-                        [sys.executable, retrain_path, "--force"],
-                        stdout=open(ROOT / "logs" / "retrain.log", "a"),
-                        stderr=subprocess.STDOUT, cwd=str(ROOT))
-                    st.info("🤖 Retraining started in background")
+                    _log_path.write_text("")           # clear old log
+                    _proc = _sp.Popen(
+                        [sys.executable, str(ROOT / "retrain.py"), "--force"],
+                        stdout=open(_log_path, "a"),
+                        stderr=_sp.STDOUT, cwd=str(ROOT))
+                    st.session_state["retrain_pid"]     = _proc.pid
+                    st.session_state["retrain_running"] = True
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ {e}")
+
+            # ── Live retrain progress ─────────────────────────────────────────
+            if st.session_state.get("retrain_running"):
+                import subprocess as _sp2
+                _log_path2 = ROOT / "logs" / "retrain.log"
+                _pid       = st.session_state.get("retrain_pid")
+
+                _alive = False
+                try:
+                    if _pid:
+                        _sp2.run(["kill", "-0", str(_pid)], check=True, capture_output=True)
+                        _alive = True
+                except Exception:
+                    _alive = False
+
+                _lines = []
+                if _log_path2.exists():
+                    _lines = [l for l in _log_path2.read_text(errors="replace").splitlines() if l.strip()][-25:]
+
+                if _alive:
+                    st.info("🔄 Retraining… this takes ~15 min. Log updates every 5 sec.")
+                else:
+                    _had_error = any("error" in l.lower() or "traceback" in l.lower() for l in _lines)
+                    if _had_error:
+                        st.error("❌ Retrain finished with errors — see log below")
+                    else:
+                        st.success("✅ Retrain complete! Restart the app to load new models.")
+                    st.session_state["retrain_running"] = False
+
+                if _lines:
+                    with st.expander(f"📋 Retrain log {'(live 🔴)' if _alive else '(done)'}", expanded=True):
+                        st.code("\n".join(_lines), language=None)
+
+                if _alive:
+                    import time as _t2; _t2.sleep(5); st.rerun()
 
         if st.button("📊 Backtest (30d)", use_container_width=True,
                      help="Check prediction accuracy vs actual results"):
@@ -616,40 +800,58 @@ with nba_tab:
 
     # ── Output ────────────────────────────────────────────────────────────────
     with right:
-        if not run_btn:
+        # Show placeholder when no result yet; show card if result cached or just run
+        _has_result = run_btn or ("_pred_result" in st.session_state)
+        if not _has_result:
+            _ph_logo = (
+                f"<img src='data:image/png;base64,{_LOGO_B64}' style='height:88px;width:auto;object-fit:contain;opacity:0.18;margin-bottom:1.2rem;display:block;'/>"
+                if _LOGO_B64 else
+                "<div class='lg'>LineBreaker</div>"
+            )
             ph = f"""<!DOCTYPE html><html><head>
             <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@600&display=swap' rel='stylesheet'>
             <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;}}
             .w{{position:relative;overflow:hidden;border-radius:16px;background:#0a0a12;border:1px solid #13131f;
-                 min-height:480px;display:flex;align-items:center;justify-content:center;}}
+                 min-height:520px;display:flex;align-items:center;justify-content:center;}}
             .bg{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
-            .i{{position:relative;z-index:1;text-align:center;padding:2rem;}}
+            .i{{position:relative;z-index:1;text-align:center;padding:2rem;display:flex;flex-direction:column;align-items:center;}}
             .lg{{font-family:'Bebas Neue',sans-serif;font-size:5rem;color:#f0672a;opacity:0.07;line-height:1;margin-bottom:1rem;}}
             .t{{font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#1a1a28;}}
             .s{{font-size:10px;color:#111118;letter-spacing:1px;margin-top:6px;}}
+            .bar{{width:36px;height:2px;background:#f0672a;opacity:0.15;border-radius:2px;margin:1rem auto 0;}}
             </style></head><body>
             <div class='w'><div class='bg'>{_svg_court()}</div>
-            <div class='i'><div class='lg'>LineBreaker</div>
+            <div class='i'>{_ph_logo}
             <div class='t'>Select a player &amp; run prediction</div>
             <div class='s'>Beat the Line. Break the Line.</div>
+            <div class='bar'></div>
             </div></div></body></html>"""
-            components.html(ph, height=480, scrolling=False)
+            components.html(ph, height=520, scrolling=False)
 
         else:
             p_row = players_df[players_df["full_name"]==sel_player].iloc[0]
             o_row = teams_df[teams_df["team_abbreviation"]==sel_opp].iloc[0]
 
-            with st.spinner(f"Predicting {sel_player}..."):
-                try:
-                    result = predict(
-                        player_id=int(p_row["id"]),
-                        opponent_team_id=int(o_row["team_id"]),
-                        opponent_name=sel_opp,
-                        is_home=(location=="Home"),
-                        rest_days=rest_days,
-                    )
-                except Exception as e:
-                    st.error(f"Prediction error: {e}")
+            if run_btn:
+                # Fresh prediction — run model and cache result
+                with st.spinner(f"Predicting {sel_player}..."):
+                    try:
+                        result = predict(
+                            player_id=int(p_row["id"]),
+                            opponent_team_id=int(o_row["team_id"]),
+                            opponent_name=sel_opp,
+                            is_home=(location=="Home"),
+                            rest_days=rest_days,
+                        )
+                        st.session_state["_pred_result"] = result
+                    except Exception as e:
+                        st.error(f"Prediction error: {e}")
+                        st.stop()
+            else:
+                # Button click (parlay / log / etc) — reload from cache
+                result = st.session_state.get("_pred_result")
+                if result is None:
+                    st.warning("Run a prediction first.")
                     st.stop()
 
             tr = result.targets.get(sel_target)
@@ -797,14 +999,14 @@ with nba_tab:
             .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
             .sc{{background:#0d0d15;border-radius:10px;padding:10px 12px;}}
             .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
-            .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
-            .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{cco};}}
             /* Edge + bet row */
             .edge-row{{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}}
             .edge-chip{{background:#0d0d15;border-radius:8px;padding:7px 12px;}}
-            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .ec-val{{font-family:'Bebas Neue',sans-serif;font-size:1.2rem;line-height:1;}}
             .bet-chip{{background:rgba({int(bet_c[1:3],16) if len(bet_c)>3 else 37},{int(bet_c[3:5],16) if len(bet_c)>5 else 37},{int(bet_c[5:7],16) if len(bet_c)>7 else 48},0.12);
                         border:1px solid {bet_c}44;border-radius:8px;padding:7px 14px;}}
@@ -812,12 +1014,12 @@ with nba_tab:
             .bc-val{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{bet_c};line-height:1;}}
             /* Consistency bar */
             .cons-bar{{flex:1;min-width:120px;}}
-            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;margin-bottom:4px;}}
+            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;margin-bottom:4px;}}
             .cons-track{{height:4px;background:#0d0d15;border-radius:2px;overflow:hidden;}}
             .cons-fill{{height:100%;background:linear-gradient(90deg,#e05a5a,#d4b44a,#4caf82);border-radius:2px;width:{int(consistency*100)}%;}}
             /* Over/under */
             .ou{{margin-bottom:16px;}}
-            .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
+            .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4a4a6a;margin-bottom:10px;}}
             .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
             .or:last-child{{margin-bottom:0;}}
             .ol{{font-size:11px;font-weight:500;color:#2a2a3a;min-width:72px;}}
@@ -928,6 +1130,136 @@ with nba_tab:
 
             components.html(html, height=630, scrolling=False)
 
+            # ── Contextual alerts (def rank, pace, injury cascade) ────────────────
+            alert_msgs = []
+
+            # Defensive rank context
+            def_info = DEF_RANKINGS.get(sel_opp)
+            if def_info:
+                rank = def_info["rank"]
+                pts_allowed = def_info["pts_allowed"]
+                rank_label = (
+                    "elite defense" if rank <= 5 else
+                    "strong defense" if rank <= 10 else
+                    "average defense" if rank <= 20 else
+                    "weak defense"
+                )
+                rank_c = "#e05a5a" if rank <= 5 else "#d4b44a" if rank <= 15 else "#4caf82"
+                alert_msgs.append(
+                    f'<span style="color:{rank_c};font-weight:700;">🛡 {sel_opp} #{rank} defense</span>'
+                    f' ({rank_label}, {pts_allowed} PTS/g allowed)'
+                )
+
+            # Pace / blowout warning from today's odds
+            if LINES_ENABLED:
+                try:
+                    today_odds = fetch_today_odds()
+                    opp_odds   = today_odds.get(sel_opp, {})
+                    spread     = opp_odds.get("spread")
+                    if spread is not None and abs(float(spread)) >= 12:
+                        alert_msgs.append(
+                            f'⚠️ <span style="color:#d4b44a;">Potential blowout (spread {spread:+.1f}) — bench time may suppress stats</span>'
+                        )
+                except Exception:
+                    pass
+
+            # Injury cascade — check if key teammates are out
+            try:
+                player_team = str(p_row.get("team_abbreviation", "")).upper()
+                teammates = players_df[
+                    (players_df["team_abbreviation"] == player_team) &
+                    (players_df["full_name"] != sel_player)
+                ].head(8)
+                if not injury_df.empty and not teammates.empty:
+                    from data.fetch_injuries import get_player_injury
+                    for _, tm in teammates.iterrows():
+                        inj = get_player_injury(injury_df, tm["full_name"])
+                        if inj and inj.get("status", "").lower() in ("out", "doubtful"):
+                            alert_msgs.append(
+                                f'📈 <span style="color:#4caf82;font-weight:700;">{tm["full_name"]} ({inj["status"].upper()})</span>'
+                                f' — teammate absence may boost {sel_player.split()[-1]}\'s role'
+                            )
+            except Exception:
+                pass
+
+            if alert_msgs:
+                alerts_html = "".join(
+                    f'<div style="font-size:0.7rem;margin-bottom:0.35rem;">{m}</div>'
+                    for m in alert_msgs
+                )
+                st.markdown(
+                    f'<div style="background:#0d0d15;border:1px solid #1a1a28;border-radius:10px;'
+                    f'padding:0.75rem 1rem;margin-bottom:0.6rem;">{alerts_html}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # ── Kelly criterion ───────────────────────────────────────────────────
+            with st.expander("💰  Kelly Criterion Bet Sizing", expanded=False):
+                kelly_bankroll = st.number_input(
+                    "Bankroll ($)", min_value=50, max_value=100000,
+                    value=1000, step=50, key="kelly_bankroll"
+                )
+                kelly = _kelly(op, edge_abs, custom_line, bankroll=kelly_bankroll)
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Quarter-Kelly %", f"{kelly['fraction']}%")
+                k2.metric("Bet Amount", f"${kelly['dollars']}")
+                k3.metric("Units", f"{kelly['units']}u")
+                st.caption("Quarter-Kelly (25% of full Kelly) used for safety. Win prob from model edge.")
+
+            # ── Season performance heatmap ────────────────────────────────────────
+            with st.expander("📅  Season Heatmap", expanded=False):
+                try:
+                    all_gl = result.recent_games
+                    if not all_gl.empty and sel_target in all_gl.columns or True:
+                        # Get more games for heatmap
+                        from data.fetch_data import get_player_gamelogs
+                        gl_full = get_player_gamelogs(int(p_row["id"]), season="2025-26")
+                        if gl_full is not None and not gl_full.empty:
+                            from features.engineer import COMBO_TARGETS as _CT
+                            if sel_target in _CT:
+                                parts = [p for p in _CT[sel_target] if p in gl_full.columns]
+                                gl_full["_hm_val"] = gl_full[parts].apply(pd.to_numeric, errors="coerce").sum(axis=1) if parts else 0
+                            elif sel_target in gl_full.columns:
+                                gl_full["_hm_val"] = pd.to_numeric(gl_full[sel_target], errors="coerce")
+                            else:
+                                gl_full["_hm_val"] = 0
+                            gl_full = gl_full.dropna(subset=["_hm_val"]).tail(30)
+                            if not gl_full.empty:
+                                mn_v  = gl_full["_hm_val"].min()
+                                mx_v  = gl_full["_hm_val"].max()
+                                rng_v = max(mx_v - mn_v, 1)
+                                cells = ""
+                                for _, gr in gl_full.iterrows():
+                                    v    = float(gr["_hm_val"])
+                                    hit  = v >= custom_line
+                                    norm = (v - mn_v) / rng_v
+                                    # Green gradient for hits, red for misses
+                                    if hit:
+                                        bg = f"rgba(76,175,130,{0.2 + norm*0.6:.2f})"
+                                        fc = "#4caf82"
+                                    else:
+                                        bg = f"rgba(224,90,90,{0.15 + (1-norm)*0.4:.2f})"
+                                        fc = "#e05a5a"
+                                    try:
+                                        gd_lbl = pd.to_datetime(gr.get("game_date","")).strftime("%-m/%-d")
+                                    except Exception:
+                                        gd_lbl = ""
+                                    cells += (
+                                        f'<div style="background:{bg};border-radius:6px;padding:6px 4px;'
+                                        f'text-align:center;min-width:44px;">'
+                                        f'<div style="font-family:\'Bebas Neue\',sans-serif;font-size:1rem;color:{fc};">{int(v)}</div>'
+                                        f'<div style="font-size:8px;color:#4a4a6a;">{gd_lbl}</div>'
+                                        f'</div>'
+                                    )
+                                st.markdown(
+                                    f'<div style="display:flex;flex-wrap:wrap;gap:6px;padding:0.5rem 0;">{cells}</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                hit_count = sum(1 for _, gr in gl_full.iterrows() if float(gr["_hm_val"]) >= custom_line)
+                                st.caption(f"Last {len(gl_full)} games — {hit_count}/{len(gl_full)} over {custom_line} ({hit_count/len(gl_full)*100:.0f}% hit rate)")
+                except Exception:
+                    st.caption("Heatmap unavailable — sync data and try again.")
+
             # ── Why this prediction? ──────────────────────────────────────────────
             with st.expander("🔍  Why this prediction?", expanded=False):
                 exp_c1, exp_c2 = st.columns(2)
@@ -961,15 +1293,15 @@ with nba_tab:
                             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.6rem;text-align:center;">
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};">{mh.get("avg","—")}</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Avg</div>
                                 </div>
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:#4caf82;">{mh.get("hit_rate_pct","—")}%</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
                                 </div>
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{mh_c};">{mh.get("n_games","—")}</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Games</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Games</div>
                                 </div>
                             </div>
                             <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.5rem;text-align:center;">
@@ -992,12 +1324,12 @@ with nba_tab:
                             <div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;">DraftKings DFS Projection</div>
                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">{dfs_score} <span style="font-size:0.9rem;color:#252535;">pts</span></div>
                         </div>
-                        <div style="font-size:0.62rem;color:#1a1a28;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
+                        <div style="font-size:0.62rem;color:#4a4a6a;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
                     </div>
                     """, unsafe_allow_html=True)
 
             # ── Log this prediction ───────────────────────────────────────────────
-            log_col, share_col = st.columns(2)
+            log_col, ud_col, share_col = st.columns(3)
             with log_col:
                 if st.button("📝 Log This Pick", use_container_width=True,
                              help="Save prediction to track accuracy"):
@@ -1012,6 +1344,32 @@ with nba_tab:
                         is_home=(location=="Home"),
                     )
                     st.success("✅ Pick logged! Check Accuracy tab to track results.")
+            with ud_col:
+                if UNDERDOG_ENABLED and st.button("🐶 Log to Underdog", key="ud_log_card_btn",
+                             use_container_width=True,
+                             help="Log this pick to your Underdog tracker — prediction pre-filled"):
+                    try:
+                        _ud_dir = "OVER" if op > 50 else "UNDER"
+                        _ud_gid = next(
+                            (g.get("game_id") for g in today_slate
+                             if g.get("home_abbr") == str(p_row.get("team_abbreviation","")).upper()
+                             or g.get("away_abbr") == str(p_row.get("team_abbreviation","")).upper()),
+                            None
+                        )
+                        ud_log_pick(
+                            player    = result.player_name,
+                            team      = str(p_row.get("team_abbreviation", "")),
+                            opponent  = sel_opp,
+                            stat      = sel_target,
+                            stat_label= target_info["label"],
+                            line      = float(custom_line),
+                            direction = _ud_dir,
+                            predicted = float(tr.predicted_value),
+                            game_id   = _ud_gid,
+                        )
+                        st.success(f"🐶 Logged! {result.player_name} {_ud_dir} {custom_line} {target_info['label']} (model: {tr.predicted_value:.1f})")
+                    except Exception as _ud_err:
+                        st.error(f"Log failed: {_ud_err}")
             with share_col:
                 share_text = (
                     f"🏀 LineBreaker Prediction\n"
@@ -1366,12 +1724,12 @@ with picks_tab:
                                         &nbsp;&middot;&nbsp;<span style="color:#2a2a3a;">{trend}</span>
                                     </div>
                                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
-                                        <span style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Edge</span>
+                                        <span style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Edge</span>
                                         <div style="flex:1;height:2px;background:#1a1a28;border-radius:2px;overflow:hidden;">
                                             <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
                                         </div>
                                         <span style="font-size:9px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
-                                        <span style="font-size:8px;color:#1a1a28;">L5 {l5} &middot; L10 {l10}</span>
+                                        <span style="font-size:8px;color:#4a4a6a;">L5 {l5} &middot; L10 {l10}</span>
                                     </div>
                                 </div>
                             </div>
@@ -1395,17 +1753,196 @@ with picks_tab:
                 with st.expander("Details"):
                     st.code(traceback.format_exc())
 
+        # ── PrizePicks Optimizer ───────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("🏆  PrizePicks Optimizer", expanded=False):
+                st.markdown('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.8rem;">Best 2 & 3-pick Power Play combos</div>', unsafe_allow_html=True)
+                import itertools as _it
+
+                def _pick_win_prob(row):
+                    """Return probability of winning this pick (handles OVER/UNDER + pct/decimal)."""
+                    op = float(row["over_prob"])
+                    if op > 1:      # stored as percentage (0-100)
+                        op = op / 100
+                    return op if row["direction"] == "OVER" else (1 - op)
+
+                src_df = qp_df[qp_df["confidence"].isin(["High", "Medium"])].head(15)
+                if src_df.empty:
+                    src_df = qp_df.head(15)
+                picks_list = [row for _, row in src_df.iterrows()]
+
+                best_2, best_3 = [], []
+                for a, b in _it.combinations(picks_list, 2):
+                    prob = _pick_win_prob(a) * _pick_win_prob(b)
+                    best_2.append((prob, a, b))
+                for a, b, c in _it.combinations(picks_list[:10], 3):
+                    prob = _pick_win_prob(a) * _pick_win_prob(b) * _pick_win_prob(c)
+                    best_3.append((prob, a, b, c))
+                best_2.sort(key=lambda x: -x[0])
+                best_3.sort(key=lambda x: -x[0])
+
+                pp_c1, pp_c2 = st.columns(2)
+                with pp_c1:
+                    st.markdown("**2-Pick Power Play**")
+                    for prob, a, b in best_2[:3]:
+                        payout = round((1 / prob) - 1, 1)
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.7rem 0.9rem;margin-bottom:0.5rem;border-left:2px solid #f0672a;">
+                            <div style="font-size:0.72rem;font-weight:700;color:#f0ede8;">{a['player'].split()[-1]} {a['direction']} {a['line']} {a['short']}</div>
+                            <div style="font-size:0.72rem;font-weight:700;color:#f0ede8;">{b['player'].split()[-1]} {b['direction']} {b['line']} {b['short']}</div>
+                            <div style="font-size:0.65rem;color:#4caf82;margin-top:4px;">Hit prob: {prob*100:.1f}% · Payout: {payout:.1f}x</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                with pp_c2:
+                    st.markdown("**3-Pick Power Play**")
+                    for prob, a, b, c in best_3[:3]:
+                        payout = round((1 / prob) - 1, 1)
+                        st.markdown(f"""
+                        <div style="background:#0d0d15;border-radius:10px;padding:0.7rem 0.9rem;margin-bottom:0.5rem;border-left:2px solid #4caf82;">
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{a['player'].split()[-1]} {a['direction']} {a['line']} {a['short']}</div>
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{b['player'].split()[-1]} {b['direction']} {b['line']} {b['short']}</div>
+                            <div style="font-size:0.68rem;font-weight:700;color:#f0ede8;">{c['player'].split()[-1]} {c['direction']} {c['line']} {c['short']}</div>
+                            <div style="font-size:0.65rem;color:#4caf82;margin-top:4px;">Hit prob: {prob*100:.1f}% · Payout: {payout:.1f}x</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+        # ── Parlay Optimizer ──────────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("🎯  Parlay Optimizer — Best 3-Pick by EV", expanded=False):
+                import itertools as _it2
+                opt_df = qp_df[qp_df["confidence"] == "High"].head(12)
+                if opt_df.empty:
+                    opt_df = qp_df.head(12)
+                opt_picks = [row for _, row in opt_df.iterrows()]
+                best_ev   = []
+                for combo in _it2.combinations(opt_picks, 3):
+                    prob = 1.0
+                    for p in combo:
+                        op = float(p["over_prob"])
+                        if op > 1: op = op / 100
+                        prob *= op if p["direction"] == "OVER" else (1 - op)
+                    # EV = prob * payout - (1-prob) * 1 where payout ≈ (1/prob - 1) at fair odds
+                    # Use DK 3-pick Power Play payout (6x)
+                    ev = prob * 5 - (1 - prob)  # net EV on 1u
+                    avg_edge = sum(p["edge"] for p in combo) / 3
+                    best_ev.append((ev, avg_edge, combo))
+                best_ev.sort(key=lambda x: -x[0])
+                if best_ev:
+                    top_ev, top_edge, top_combo = best_ev[0]
+                    st.markdown(f'<div style="font-size:0.62rem;color:#2a2a3a;margin-bottom:0.6rem;">Best combo by expected value at 6x payout (PrizePicks Power Play)</div>', unsafe_allow_html=True)
+                    for p in top_combo:
+                        pc2 = TEAM_COLORS.get(p["team"], "#f0672a")
+                        st.markdown(f"""
+                        <div style="display:flex;align-items:center;justify-content:space-between;
+                                    padding:0.5rem 0.8rem;border-bottom:1px solid #0d0d15;">
+                            <span style="font-size:0.78rem;font-weight:700;color:#f0ede8;">{p['player']}</span>
+                            <span style="font-family:'Bebas Neue',sans-serif;font-size:1.1rem;color:{pc2};">{p['direction']} {p['line']} {p['short']}</span>
+                            <span style="font-size:0.68rem;color:#4caf82;">{p['over_prob']}% · {p['confidence']}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    combo_prob = 1.0
+                    for p in top_combo:
+                        op2 = float(p["over_prob"])
+                        if op2 > 1: op2 = op2 / 100
+                        combo_prob *= op2 if p["direction"] == "OVER" else (1 - op2)
+                    st.markdown(f"""
+                    <div style="margin-top:0.8rem;display:flex;gap:1.5rem;">
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Hit Prob</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#4caf82;">{combo_prob*100:.1f}%</div></div>
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">EV per 1u</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{'#4caf82' if top_ev>=0 else '#e05a5a'};">{top_ev:+.2f}u</div></div>
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Avg Edge</span>
+                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#f0672a;">{top_edge:.1f}x</div></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ── Quick Picks Pivot Table ───────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("📊  Stat Pivot Table", expanded=False):
+                try:
+                    pivot_data = {}
+                    for _, row in qp_df.iterrows():
+                        player = row["player"]
+                        stat   = row["short"]
+                        val    = f"{'⬆' if row['direction']=='OVER' else '⬇'}{row['predicted']}"
+                        pivot_data.setdefault(player, {})[stat] = val
+                    if pivot_data:
+                        pivot_df = pd.DataFrame(pivot_data).T.fillna("—")
+                        st.dataframe(pivot_df, use_container_width=True)
+                except Exception:
+                    st.caption("Pivot view unavailable.")
+
+        # ── Discord Webhook ───────────────────────────────────────────────────
+        if qp_df is not None and not qp_df.empty:
+            with st.expander("📣  Share to Discord", expanded=False):
+                discord_url = st.text_input(
+                    "Discord Webhook URL",
+                    placeholder="https://discord.com/api/webhooks/...",
+                    key="discord_webhook",
+                    type="password",
+                )
+                if discord_url and st.button("📣 Post Top 5 Picks to Discord", key="discord_send"):
+                    try:
+                        import requests as _req
+                        top5 = qp_df.head(5)
+                        lines = ["**🏀 LineBreaker — Today's Top Picks**", ""]
+                        for rank, (_, row) in enumerate(top5.iterrows(), 1):
+                            arrow = "⬆" if row["direction"] == "OVER" else "⬇"
+                            lines.append(f"**#{rank}** {row['player']} {arrow} {row['line']} {row['short']} ({row['direction']} {row['over_prob']}% · {row['confidence']})")
+                        lines += ["", "Beat the Line. Break the Line. 🔥"]
+                        payload = {"content": "\n".join(lines), "username": "LineBreaker"}
+                        resp = _req.post(discord_url, json=payload, timeout=8)
+                        if resp.status_code in (200, 204):
+                            st.success("✅ Posted to Discord!")
+                        else:
+                            st.error(f"Discord error: {resp.status_code}")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ACCURACY TAB
 # ══════════════════════════════════════════════════════════════════════════════
 with accuracy_tab:
-    # Resolve any pending predictions
-    try:
-        resolved = resolve_predictions()
-        if resolved > 0:
-            st.success(f"✅ Resolved {resolved} predictions with actual results!")
-    except Exception:
-        pass
+    # ── Auto-resolve row ───────────────────────────────────────────────────────
+    ar_col1, ar_col2, ar_col3 = st.columns([2, 2, 2])
+    with ar_col1:
+        if st.button("🤖 Auto-Resolve from ESPN", use_container_width=True,
+                     help="Pull actual box scores and resolve pending picks automatically"):
+            with st.spinner("Fetching box scores..."):
+                try:
+                    n = auto_resolve_from_espn()
+                    if n > 0:
+                        st.success(f"✅ Resolved {n} pick{'s' if n>1 else ''} from ESPN box scores!")
+                    else:
+                        st.info("No pending picks matched recent completed games.")
+                except Exception as e:
+                    st.error(f"Auto-resolve failed: {e}")
+    with ar_col2:
+        # Resolve from nba_api (existing)
+        try:
+            resolved = resolve_predictions()
+            if resolved > 0:
+                st.success(f"✅ Resolved {resolved} predictions with actual results!")
+        except Exception:
+            pass
+    with ar_col3:
+        # Historical CSV export
+        try:
+            all_preds_export = get_all_preds_full()
+            if all_preds_export:
+                import io as _io2
+                exp_df = pd.DataFrame(all_preds_export)
+                csv2   = _io2.StringIO()
+                exp_df.to_csv(csv2, index=False)
+                st.download_button(
+                    label="📥 Export All Picks CSV",
+                    data=csv2.getvalue(),
+                    file_name="linebreaker_history.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+        except Exception:
+            pass
 
     stats = get_accuracy_stats()
 
@@ -1492,6 +2029,67 @@ with accuracy_tab:
                 </div>
                 """, unsafe_allow_html=True)
 
+        # ── Accuracy Trend Chart ───────────────────────────────────────────────
+        trend_data = get_accuracy_trend(days=60)
+        if len(trend_data) >= 2:
+            st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Accuracy Trend (60 days)</div>', unsafe_allow_html=True)
+            TW, TH, TPL, TPR, TPT, TPB = 700, 120, 10, 10, 10, 25
+            t_dates = [d["date"] for d in trend_data]
+            t_vals  = [d["rolling"] for d in trend_data]
+            t_n     = len(t_vals)
+            def _tx(i): return TPL + i * (TW - TPL - TPR) / max(t_n - 1, 1)
+            def _ty(v): return TPT + (1 - v / 100) * (TH - TPT - TPB)
+            t_pts   = " ".join(f"{_tx(i):.1f},{_ty(v):.1f}" for i, v in enumerate(t_vals))
+            t_fx, t_lx = _tx(0), _tx(t_n - 1)
+            t_ap    = f"M {t_fx:.1f},{TH-TPB} " + " ".join(f"L {_tx(i):.1f},{_ty(v):.1f}" for i, v in enumerate(t_vals)) + f" L {t_lx:.1f},{TH-TPB} Z"
+            # 50% baseline
+            t_base  = _ty(50)
+            trend_svg = (
+                f'<svg width="100%" viewBox="0 0 {TW} {TH}" xmlns="http://www.w3.org/2000/svg" style="overflow:visible;display:block;">'
+                f'<defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f0672a" stop-opacity="0.3"/><stop offset="100%" stop-color="#f0672a" stop-opacity="0"/></linearGradient></defs>'
+                f'<line x1="{TPL}" y1="{t_base:.1f}" x2="{TW-TPR}" y2="{t_base:.1f}" stroke="#252535" stroke-dasharray="3,4" stroke-width="1"/>'
+                f'<text x="{TW-TPR+2}" y="{t_base+4:.1f}" font-size="8" fill="#252535" font-family="Inter,sans-serif">50%</text>'
+                f'<path d="{t_ap}" fill="url(#tg)"/>'
+                f'<polyline points="{t_pts}" fill="none" stroke="#f0672a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+            )
+            # Dots + labels for last 5
+            for i, (v, d) in enumerate(zip(t_vals, t_dates)):
+                if i >= t_n - 5 or i == 0:
+                    cx2, cy2 = _tx(i), _ty(v)
+                    tc2 = "#4caf82" if v >= 55 else "#d4b44a" if v >= 50 else "#e05a5a"
+                    trend_svg += f'<circle cx="{cx2:.1f}" cy="{cy2:.1f}" r="3" fill="{tc2}" stroke="#080810" stroke-width="1"/>'
+                    if i == t_n - 1 or i == 0:
+                        anchor = "end" if i == t_n - 1 else "start"
+                        trend_svg += f'<text x="{cx2:.1f}" y="{cy2-6:.1f}" text-anchor="{anchor}" font-size="9" fill="{tc2}" font-family="Inter,sans-serif">{v:.0f}%</text>'
+            trend_svg += "</svg>"
+            components.html(
+                f'<!DOCTYPE html><html><head><style>*{{margin:0;box-sizing:border-box;}}body{{background:transparent;}}'
+                f'.w{{background:#0a0a12;border:1px solid #13131f;border-radius:10px;padding:12px 16px;}}</style></head>'
+                f'<body><div class="w">{trend_svg}</div></body></html>',
+                height=150, scrolling=False,
+            )
+
+        # ── Confidence Calibration ─────────────────────────────────────────────
+        by_conf = stats.get("by_confidence", {})
+        if any(v["total"] > 0 for v in by_conf.values()):
+            st.markdown('<div style="margin-top:1.2rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Confidence Calibration</div>', unsafe_allow_html=True)
+            cal_cols = st.columns(3)
+            for i, (conf, cdata) in enumerate([("High", by_conf.get("High",{})), ("Medium", by_conf.get("Medium",{})), ("Low", by_conf.get("Low",{}))]):
+                conf_c = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}[conf]
+                with cal_cols[i]:
+                    cacc = cdata.get("accuracy", 0.0) if cdata.get("total",0) > 0 else 0.0
+                    ctot = cdata.get("total", 0)
+                    st.markdown(f"""
+                    <div style="background:#0a0a12;border:1px solid #13131f;border-radius:10px;padding:0.8rem;text-align:center;">
+                        <div style="font-size:0.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:{conf_c};margin-bottom:6px;">{conf}</div>
+                        <div style="font-family:'Bebas Neue',sans-serif;font-size:2rem;color:{conf_c};line-height:1;">{cacc:.0f}%</div>
+                        <div style="height:4px;background:#1a1a28;border-radius:2px;overflow:hidden;margin:6px 0;">
+                            <div style="height:100%;width:{cacc}%;background:{conf_c};border-radius:2px;"></div>
+                        </div>
+                        <div style="font-size:0.62rem;color:#2a2a3a;">{ctot} picks</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
         # Recent picks log
         st.markdown('<div style="margin-top:1.5rem;font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;margin-bottom:0.6rem;">Recent Picks</div>', unsafe_allow_html=True)
         try:
@@ -1514,7 +2112,7 @@ with accuracy_tab:
                         padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.72rem;">
                 <div>{icon} <strong style="color:#e8e6e0;">{p["player_name"]}</strong>
                     <span style="color:#2a2a3a;margin-left:4px;">{tinfo.get("short","?")} {p["pick"]} {p["custom_line"]}</span>
-                    <span style="color:#1a1a28;">{note_txt}</span>
+                    <span style="color:#5a5a7a;">{note_txt}</span>
                 </div>
                 <div style="color:#2a2a3a;">{actual} · {p.get("game_date","")}</div>
             </div>
@@ -1549,6 +2147,216 @@ with accuracy_tab:
                                 st.error(f"Error: {e}")
                 else:
                     st.info("No pending picks to resolve.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UNDERDOG TAB
+# ══════════════════════════════════════════════════════════════════════════════
+with ud_tab:
+    _lbl = '<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">'
+
+    if not UNDERDOG_ENABLED:
+        st.info("Underdog tracker module not loaded.")
+    else:
+        # ── Build lookup helpers from live NBA data ────────────────────────────
+        # player → team abbr
+        _ud_player_team = dict(zip(
+            players_df["full_name"].str.strip(),
+            players_df["team_abbreviation"].fillna(""),
+        )) if not players_df.empty else {}
+        # team abbr → opponent today
+        _ud_team_opp = {}
+        for _g in today_slate:
+            _ud_team_opp[_g["home_abbr"]] = _g["away_abbr"]
+            _ud_team_opp[_g["away_abbr"]] = _g["home_abbr"]
+
+        _all_team_abbrs = sorted(["ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN",
+            "DET","GSW","HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN",
+            "NOP","NYK","OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR",
+            "UTA","WSH"])
+
+        # ── Stats banner ──────────────────────────────────────────────────────
+        _ud_stats = ud_get_stats()
+        _ud_total = _ud_stats.get("total", 0)
+        _ud_wins  = _ud_stats.get("wins", 0)
+        _ud_losses= _ud_stats.get("losses", 0)
+        _ud_wr    = _ud_stats.get("win_rate", 0.0)
+        _ud_push  = _ud_stats.get("pushes", 0)
+
+        _sc1,_sc2,_sc3,_sc4,_sc5 = st.columns(5)
+        _sc1.metric("Total", _ud_total)
+        _sc2.metric("Wins", _ud_wins)
+        _sc3.metric("Losses", _ud_losses)
+        _sc4.metric("Pushes", _ud_push)
+        _sc5.metric("Win Rate", f"{_ud_wr:.1f}%")
+
+        st.divider()
+
+        # ── Log a new pick ────────────────────────────────────────────────────
+        with st.expander("➕  Log a New Pick", expanded=_ud_total == 0):
+            _players_df_ud   = players_df
+            _player_names_ud = sorted(_players_df_ud["full_name"].dropna().unique().tolist())
+            _uc1, _uc2, _uc3 = st.columns(3)
+            with _uc1:
+                ud_player = st.selectbox("Player", options=_player_names_ud, key="ud_player")
+                ud_stat_lbl = st.selectbox("Stat", [v["label"] for v in TARGET_DISPLAY.values()], key="ud_stat_lbl")
+                ud_stat = next((k for k,v in TARGET_DISPLAY.items() if v["label"]==ud_stat_lbl), "pts")
+            with _uc2:
+                # Auto-populate team and opponent
+                _auto_team = _ud_player_team.get(ud_player, "")
+                _auto_opp  = _ud_team_opp.get(_auto_team, "")
+                ud_team = st.selectbox("Team (auto-filled)", [""] + _all_team_abbrs,
+                    index=([""] + _all_team_abbrs).index(_auto_team) if _auto_team in _all_team_abbrs else 0,
+                    key="ud_team")
+                ud_opp  = st.selectbox("Opponent (auto-filled)", [""] + _all_team_abbrs,
+                    index=([""] + _all_team_abbrs).index(_auto_opp) if _auto_opp in _all_team_abbrs else 0,
+                    key="ud_opp")
+            with _uc3:
+                ud_line = st.number_input("Underdog Line", min_value=0.0, max_value=200.0, value=20.0, step=0.5, key="ud_line")
+                ud_dir  = st.radio("Direction", ["OVER","UNDER"], horizontal=True, key="ud_dir")
+            ud_notes = st.text_input("Notes (optional)", placeholder="e.g. back-to-back, hot streak…", key="ud_notes")
+            st.caption("💡 Tip: Click **🐶 Log to Underdog** on any NBA prediction card to auto-fill everything including the model's prediction.")
+            if st.button("Log Pick", type="primary", key="ud_log_btn"):
+                ud_log_pick(player=ud_player, team=ud_team, opponent=ud_opp,
+                            stat=ud_stat, stat_label=ud_stat_lbl,
+                            line=ud_line, direction=ud_dir, predicted=None, notes=ud_notes)
+                st.success(f"✅ {ud_player} {ud_dir} {ud_line} {ud_stat_lbl} logged!")
+                st.rerun()
+
+        # ── Pick table (editable) ─────────────────────────────────────────────
+        _ud_picks = ud_get_picks(days=90)
+        _hdr1, _hdr2 = st.columns([3,1])
+        with _hdr1:
+            st.markdown(_lbl + f"Pick History ({len(_ud_picks)} picks)</div>", unsafe_allow_html=True)
+        with _hdr2:
+            if st.button("🔄 Auto-Resolve", use_container_width=True, key="ud_autoresolve",
+                         help="Pull final box scores from ESPN and resolve pending picks"):
+                with st.spinner("Fetching from ESPN…"):
+                    _resolved = ud_auto_resolve()
+                if _resolved > 0:
+                    update_bias()
+                    st.success(f"✅ Resolved {_resolved} pick(s)!")
+                else:
+                    st.info("No new picks resolved yet — games may still be in progress.")
+                st.rerun()
+
+        if not _ud_picks:
+            st.info("No picks yet. Log your first pick above or click 🐶 Log to Underdog on a prediction card.")
+        else:
+            _outcome_icon = {"W": "✅ W", "L": "❌ L", "P": "➖ P", None: "⏳"}
+
+            # Build display + editable table
+            _editor_rows = []
+            _pick_ids    = []
+            for _p in _ud_picks:
+                _pick_ids.append(_p["id"])
+                _editor_rows.append({
+                    "Result":   _outcome_icon.get(_p.get("outcome"), "⏳"),
+                    "Date":     _p.get("date",""),
+                    "Player":   _p.get("player",""),
+                    "Team":     _p.get("team","") or "",
+                    "Opponent": _p.get("opponent","") or "",
+                    "Stat":     _p.get("stat_label", _p.get("stat","")),
+                    "Line":     float(_p.get("line") or 0),
+                    "Dir":      _p.get("direction","OVER"),
+                    "Model":    float(_p["predicted"]) if _p.get("predicted") is not None else None,
+                    "Actual":   float(_p["actual"])    if _p.get("actual")    is not None else None,
+                    "Notes":    _p.get("notes","") or "",
+                })
+
+            _editor_df = pd.DataFrame(_editor_rows)
+            _edited = st.data_editor(
+                _editor_df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "Result":   st.column_config.TextColumn("Result", disabled=True, width="small"),
+                    "Date":     st.column_config.TextColumn("Date",   disabled=True, width="small"),
+                    "Player":   st.column_config.TextColumn("Player", disabled=True),
+                    "Team":     st.column_config.SelectboxColumn("Team",     options=_all_team_abbrs, width="small"),
+                    "Opponent": st.column_config.SelectboxColumn("Opponent", options=_all_team_abbrs, width="small"),
+                    "Stat":     st.column_config.TextColumn("Stat",   disabled=True),
+                    "Line":     st.column_config.NumberColumn("Line",   min_value=0.0, max_value=200.0, step=0.5, format="%.1f"),
+                    "Dir":      st.column_config.SelectboxColumn("Dir", options=["OVER","UNDER"], width="small"),
+                    "Model":    st.column_config.NumberColumn("Model",  min_value=0.0, max_value=200.0, step=0.5, format="%.1f", disabled=True),
+                    "Actual":   st.column_config.NumberColumn("Actual", min_value=0.0, max_value=200.0, step=0.5, format="%.1f"),
+                    "Notes":    st.column_config.TextColumn("Notes"),
+                },
+                key="ud_editor",
+            )
+
+            # Detect changes and save
+            _changes_made = not _edited.equals(_editor_df)
+            _save_col, _csv_col = st.columns([1,1])
+            with _save_col:
+                if st.button("💾 Save all changes", type="primary", use_container_width=True,
+                             disabled=not _changes_made, key="ud_save_all"):
+                    _saved = 0
+                    for _i, (_row, _pid) in enumerate(zip(_edited.itertuples(index=False), _pick_ids)):
+                        _orig = _editor_rows[_i]
+                        _upd = {}
+                        if _row.Team     != _orig["Team"]:     _upd["team"]      = _row.Team or ""
+                        if _row.Opponent != _orig["Opponent"]: _upd["opponent"]  = _row.Opponent or ""
+                        if _row.Line     != _orig["Line"]:     _upd["line"]      = _row.Line
+                        if _row.Dir      != _orig["Dir"]:      _upd["direction"] = _row.Dir
+                        if _row.Actual   != _orig["Actual"] and _row.Actual is not None:
+                            _upd["actual"] = _row.Actual
+                        if _row.Notes    != _orig["Notes"]:    _upd["notes"]     = _row.Notes or ""
+                        if _upd:
+                            ud_update_pick(_pid, **_upd)
+                            _saved += 1
+                    if _saved:
+                        update_bias()
+                        st.success(f"✅ Saved {_saved} change(s)!")
+                        st.rerun()
+            with _csv_col:
+                st.download_button("⬇️ Export CSV", _editor_df.to_csv(index=False),
+                                   "underdog_picks.csv", "text/csv",
+                                   use_container_width=True, key="ud_csv_dl")
+
+            # ── Delete picks — per-row buttons ────────────────────────────────
+            with st.expander("🗑️  Delete a pick"):
+                for _pidx, _p in enumerate(_ud_picks):
+                    _del_label = f"{_p.get('date','')} · {_p.get('player','')} {_p.get('direction','')} {_p.get('line','')} {_p.get('stat_label','')}"
+                    _dcol1, _dcol2 = st.columns([5, 1])
+                    with _dcol1:
+                        st.caption(_del_label)
+                    with _dcol2:
+                        if st.button("🗑️", key=f"ud_del_{_p['id']}_{_pidx}", help=f"Delete: {_del_label}"):
+                            ud_delete_pick(_p["id"])
+                            st.rerun()
+
+        st.divider()
+
+        # ── Bias corrections learned ──────────────────────────────────────────
+        with st.expander("🧠  Learned Bias Corrections"):
+            st.markdown(_lbl + "Model learns from your resolved picks to auto-correct future predictions</div>", unsafe_allow_html=True)
+            _corr = get_all_corrections()
+            if not _corr:
+                st.info("No corrections yet — resolve at least 3 picks per player/stat to build corrections.")
+            else:
+                _corr_rows = []
+                for _pname, _stats in _corr.items():
+                    for _sname, _val in _stats.items():
+                        _corr_rows.append({
+                            "Player": _pname,
+                            "Stat":   _sname,
+                            "Correction": f"{'+' if _val>=0 else ''}{_val:.2f}",
+                            "Direction": "↑ Model under-predicts" if _val>0 else "↓ Model over-predicts",
+                        })
+                if _corr_rows:
+                    st.dataframe(pd.DataFrame(_corr_rows), use_container_width=True, hide_index=True)
+
+        # ── By-stat breakdown ─────────────────────────────────────────────────
+        if _ud_stats.get("by_stat"):
+            with st.expander("📊  Performance by Stat"):
+                _stat_rows = [
+                    {"Stat": s, "Picks": v["total"], "Wins": v["wins"],
+                     "Win Rate": f"{v['win_rate']:.1f}%"}
+                    for s,v in sorted(_ud_stats["by_stat"].items(), key=lambda x:-x[1]["win_rate"])
+                ]
+                st.dataframe(pd.DataFrame(_stat_rows), use_container_width=True, hide_index=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NFL TAB

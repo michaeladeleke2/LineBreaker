@@ -1,26 +1,26 @@
 """
-linebreaker/data/fetch_lineups.py
+linebreaker/data/fetch_lines.py
 
-Fetches NBA starting lineup data from ESPN's free public API.
-No API key required.
+Fetches sportsbook betting lines (spreads, totals, player props) from ESPN's
+free public API and optionally The Odds API (if ODDS_API_KEY env var is set).
+No API key required for ESPN endpoints.
 
 Endpoints used:
-- Scoreboard: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
-  → Contains today's games with team IDs
-- Boxscore: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event={game_id}
-  → Contains starters for live/completed games
-
-For upcoming games (no boxscore yet), falls back to:
-- Depth chart: https://site.api.espn.com/apis/v2/sports/basketball/nba/teams/{team_id}/depthcharts
-  → Lists expected starters by position
+- NBA scoreboard: https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard
+  → Contains today's games with embedded odds (spread, overUnder)
+- ESPN odds items: https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/events/{event_id}/competitions/{event_id}/odds/{provider_id}/items
+  → Contains player prop lines per provider
 
 Usage:
-    from data.fetch_lineups import get_player_lineup_status, fetch_all_lineups
-    status = get_player_lineup_status("LeBron James")
-    # Returns: {"is_starter": True, "status": "starter", "multiplier": 1.0}
+    from data.fetch_lines import fetch_today_odds, fetch_player_props, compute_edge
+    odds = fetch_today_odds()
+    props = fetch_player_props("LeBron James")
+    edge = compute_edge(predicted=28.3, line=26.5, target="pts")
 """
 
+import os
 import json
+import time
 import requests
 import pandas as pd
 from pathlib import Path
@@ -29,174 +29,442 @@ from datetime import date, datetime
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-ESPN_SCOREBOARD  = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-ESPN_SUMMARY     = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
-ESPN_DEPTHCHART  = "https://site.api.espn.com/apis/v2/sports/basketball/nba/teams/{team_id}/depthcharts"
+ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+ESPN_ODDS_ITEMS = (
+    "https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba"
+    "/events/{event_id}/competitions/{event_id}/odds/{provider_id}/items"
+)
+THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-TIMEOUT = 12
+TIMEOUT = 10
 
-# Minutes multiplier based on role
-ROLE_MULTIPLIERS = {
-    "starter":      1.0,
-    "sixth_man":    0.88,
-    "bench":        0.75,
-    "inactive":     0.0,
-    "unknown":      1.0,  # don't penalize if we can't determine
+# Cache TTL in seconds
+ODDS_CACHE_TTL   = 300   # 5 minutes for odds
+PROPS_CACHE_TTL  = 300   # 5 minutes for props
+
+# In-memory cache: {key: (timestamp, data)}
+_mem_cache: dict = {}
+
+
+# ── Default lines used as fallbacks ───────────────────────────────────────────
+
+DEFAULT_LINES = {
+    "pts":          22.5,
+    "reb":           6.5,
+    "ast":           5.5,
+    "stl":           1.5,
+    "blk":           1.5,
+    "tov":           2.5,
+    "fg3m":          2.5,
+    "fg3a":          6.5,
+    "fga":          14.5,
+    "pts_reb_ast":  34.5,
+    "pts_reb":      29.5,
+    "pts_ast":      29.5,
+    "reb_ast":      11.5,
+    "blk_stl":       2.5,
+    "double_double": 0.5,
+    "triple_double": 0.5,
+}
+
+# Map ESPN prop type labels to our target keys (best-effort)
+ESPN_PROP_MAP = {
+    "points":              "pts",
+    "total points":        "pts",
+    "rebounds":            "reb",
+    "total rebounds":      "reb",
+    "assists":             "ast",
+    "total assists":       "ast",
+    "steals":              "stl",
+    "blocks":              "blk",
+    "turnovers":           "tov",
+    "three point field goals made": "fg3m",
+    "threes":              "fg3m",
+    "three-pointers made": "fg3m",
+    "field goals attempted": "fga",
+    "pts + reb + ast":     "pts_reb_ast",
+    "points + rebounds + assists": "pts_reb_ast",
+    "pts + reb":           "pts_reb",
+    "points + rebounds":   "pts_reb",
+    "pts + ast":           "pts_ast",
+    "points + assists":    "pts_ast",
+    "reb + ast":           "reb_ast",
+    "rebounds + assists":  "reb_ast",
+    "blk + stl":           "blk_stl",
+    "blocks + steals":     "blk_stl",
+}
+
+# Map The Odds API market keys → our target keys
+ODDS_API_MARKET_MAP = {
+    "player_points":       "pts",
+    "player_rebounds":     "reb",
+    "player_assists":      "ast",
+    "player_steals":       "stl",
+    "player_blocks":       "blk",
+    "player_turnovers":    "tov",
+    "player_threes":       "fg3m",
+    "player_field_goals":  "fga",
 }
 
 
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
 def _get(url: str, params: dict = None) -> dict:
+    """HTTP GET with timeout and graceful error handling."""
     try:
         resp = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        print(f"  Lineup fetch failed: {e}")
+    except Exception:
         return {}
 
 
-def fetch_all_lineups(force_refresh: bool = False) -> pd.DataFrame:
+def _cache_get(key: str, ttl: int):
+    """Return cached value if still fresh, else None."""
+    entry = _mem_cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    if time.time() - ts < ttl:
+        return data
+    return None
+
+
+def _cache_set(key: str, data):
+    _mem_cache[key] = (time.time(), data)
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, strip accents-agnostic normalization for fuzzy matching."""
+    return name.lower().strip()
+
+
+def _name_match(a: str, b: str) -> bool:
     """
-    Fetch today's starting lineup data.
-    Returns DataFrame: player_name, team_abbr, is_starter, role, starter_confirmed
-    Cached for 30 minutes (lineups change up to tip-off).
+    True if player names are likely the same person.
+    Checks exact match, last-name match, and substring match.
     """
-    today      = date.today().isoformat()
-    cache_path = CACHE_DIR / f"lineups_{today}.csv"
+    a, b = _normalize_name(a), _normalize_name(b)
+    if a == b:
+        return True
+    a_last = a.split()[-1] if a.split() else a
+    b_last = b.split()[-1] if b.split() else b
+    if a_last == b_last and len(a_last) > 3:
+        return True
+    return a in b or b in a
 
-    # Use cache if fresh enough (within 30 min)
-    if cache_path.exists() and not force_refresh:
-        age = (datetime.now() - datetime.fromtimestamp(cache_path.stat().st_mtime)).seconds
-        if age < 1800:
-            df = pd.read_csv(cache_path)
-            print(f"  Lineup cache loaded ({len(df)} players, {age//60}min old)")
-            return df
 
-    # Clean old lineup caches
-    for old in CACHE_DIR.glob("lineups_*.csv"):
-        if old.name != cache_path.name:
-            old.unlink()
+# ── Public API ────────────────────────────────────────────────────────────────
 
-    print("Fetching lineup data from ESPN...")
-    rows = []
+def fetch_today_odds() -> dict:
+    """
+    Fetch today's NBA game odds from ESPN scoreboard.
 
-    # Get today's scoreboard for game IDs
-    board = _get(ESPN_SCOREBOARD)
+    Returns dict keyed by team abbreviation:
+        {
+            "LAL": {"spread": -4.5, "total": 228.5, "game_id": "401773456"},
+            "GSW": {"spread":  4.5, "total": 228.5, "game_id": "401773456"},
+            ...
+        }
+    Falls back to {} if unavailable.
+    Cached for 5 minutes.
+    """
+    cache_key = f"today_odds_{date.today().isoformat()}"
+    cached = _cache_get(cache_key, ODDS_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    today_str = date.today().strftime("%Y%m%d")
+    board = _get(ESPN_SCOREBOARD, params={"dates": today_str, "lang": "en", "region": "us"})
+    if not board:
+        board = _get(ESPN_SCOREBOARD)
+
+    result: dict = {}
     events = board.get("events", [])
 
     for event in events:
-        game_id    = event.get("id", "")
-        status_num = event.get("status", {}).get("type", {}).get("id", "1")
-        competitions = event.get("competitions", [{}])
+        event_id = event.get("id", "")
+        competitions = event.get("competitions", [])
         if not competitions:
             continue
-
         comp = competitions[0]
-        teams = comp.get("competitors", [])
 
-        # Try boxscore first (live or completed games)
-        if str(status_num) in ("2", "3"):  # live or final
-            summary = _get(ESPN_SUMMARY, params={"event": game_id})
-            box = summary.get("boxscore", {})
-            for team_box in box.get("players", []):
-                team_abbr = team_box.get("team", {}).get("abbreviation", "")
-                stats     = team_box.get("statistics", [{}])
-                athletes  = stats[0].get("athletes", []) if stats else []
-                for ath in athletes:
-                    name    = ath.get("athlete", {}).get("displayName", "")
-                    starter = ath.get("starter", False)
-                    active  = ath.get("active", True)
-                    did_not_play = ath.get("didNotPlay", False)
+        # Pull teams
+        competitors = comp.get("competitors", [])
+        team_abbrs: dict = {}   # home_away -> abbr
+        for c in competitors:
+            abbr = (c.get("team", {}) or {}).get("abbreviation", "")
+            home_away = c.get("homeAway", "")
+            if abbr:
+                team_abbrs[home_away] = abbr
 
-                    if did_not_play or not active:
-                        role = "inactive"
-                    elif starter:
-                        role = "starter"
-                    else:
-                        role = "bench"
+        # Pull odds — ESPN embeds a list of providers in comp["odds"]
+        odds_list = comp.get("odds", [])
+        if not odds_list:
+            continue
 
-                    rows.append({
-                        "player_name":       name,
-                        "team_abbr":         team_abbr,
-                        "is_starter":        starter and active and not did_not_play,
-                        "role":              role,
-                        "starter_confirmed": True,  # from actual boxscore
-                        "game_id":           game_id,
-                    })
-        else:
-            # Upcoming game — depth chart endpoint no longer available
-            # Lineups will be confirmed once game starts via boxscore
-            pass
+        # Use first available provider
+        for odds_entry in odds_list:
+            spread_raw    = odds_entry.get("spread")
+            over_under    = odds_entry.get("overUnder")
+            details       = odds_entry.get("details", "")   # e.g. "LAL -4.5"
+            home_team_odd = odds_entry.get("homeTeamOdds", {}) or {}
+            away_team_odd = odds_entry.get("awayTeamOdds", {}) or {}
 
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["player_name","team_abbr","is_starter","role","starter_confirmed","game_id"])
+            # Parse spread per team from details string or homeTeamOdds
+            home_spread = home_team_odd.get("spreadOdds") or home_team_odd.get("pointSpread", {}).get("current")
+            away_spread = away_team_odd.get("spreadOdds") or away_team_odd.get("pointSpread", {}).get("current")
 
-    if not df.empty:
-        df.to_csv(cache_path, index=False)
-        confirmed = df["starter_confirmed"].sum()
-        projected  = (~df["starter_confirmed"]).sum()
-        print(f"  Lineups: {len(df)} players ({confirmed} confirmed, {projected} projected)")
+            # Fallback: try numeric spread field
+            if home_spread is None and spread_raw is not None:
+                try:
+                    home_spread = float(spread_raw)
+                    away_spread = -float(spread_raw)
+                except (TypeError, ValueError):
+                    pass
 
-    return df
+            total = None
+            if over_under is not None:
+                try:
+                    total = float(over_under)
+                except (TypeError, ValueError):
+                    pass
+
+            home_abbr = team_abbrs.get("home", "")
+            away_abbr = team_abbrs.get("away", "")
+
+            if home_abbr:
+                result[home_abbr] = {
+                    "spread":   float(home_spread) if home_spread is not None else None,
+                    "total":    total,
+                    "game_id":  event_id,
+                    "is_home":  True,
+                }
+            if away_abbr:
+                result[away_abbr] = {
+                    "spread":   float(away_spread) if away_spread is not None else None,
+                    "total":    total,
+                    "game_id":  event_id,
+                    "is_home":  False,
+                }
+            break  # use first provider only
+
+    _cache_set(cache_key, result)
+    return result
 
 
-def get_player_lineup_status(player_name: str,
-                              lineup_df: pd.DataFrame = None) -> dict:
+def _fetch_espn_props(event_id: str, player_name: str) -> dict:
     """
-    Get lineup status for a specific player.
-    Returns dict: is_starter, role, multiplier, confirmed
+    ESPN's /odds/{provider_id}/items endpoint is not publicly accessible (returns 404).
+    Player props require The Odds API or another source — return {} immediately.
     """
-    if lineup_df is None:
-        lineup_df = fetch_all_lineups()
+    return {}
 
-    if lineup_df.empty:
-        return {"is_starter": None, "role": "unknown",
-                "multiplier": 1.0, "confirmed": False}
 
-    # Match on last name first, then full name
-    last_name = player_name.split()[-1]
-    matches   = lineup_df[lineup_df["player_name"].str.contains(last_name, case=False, na=False)]
+def _fetch_odds_api_props(player_name: str) -> dict:
+    """
+    Fetch player props from The Odds API (https://the-odds-api.com).
+    Only used if ODDS_API_KEY environment variable is set.
+    Returns {target_key: line_value} or {}.
+    """
+    api_key = os.environ.get("ODDS_API_KEY", "")
+    if not api_key:
+        return {}
 
-    if matches.empty:
-        return {"is_starter": None, "role": "unknown",
-                "multiplier": 1.0, "confirmed": False}
+    props: dict = {}
+    markets = ",".join(ODDS_API_MARKET_MAP.keys())
 
-    # If multiple matches, prefer confirmed
-    confirmed = matches[matches["starter_confirmed"]]
-    row = confirmed.iloc[0] if not confirmed.empty else matches.iloc[0]
+    # First get today's events
+    try:
+        events_url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        resp = requests.get(
+            events_url,
+            params={
+                "apiKey":     api_key,
+                "regions":    "us",
+                "markets":    "h2h",
+                "dateFormat": "iso",
+            },
+            headers=HEADERS,
+            timeout=TIMEOUT,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception as e:
+        print(f"  The Odds API events failed: {e}")
+        return {}
 
-    role       = str(row.get("role", "unknown"))
-    multiplier = ROLE_MULTIPLIERS.get(role, 1.0)
+    today_str = date.today().isoformat()
+    today_events = [e for e in events if e.get("commence_time", "").startswith(today_str)]
+
+    for event in today_events:
+        event_id = event.get("id", "")
+        try:
+            props_resp = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/basketball_nba/events/{event_id}/odds",
+                params={
+                    "apiKey":     api_key,
+                    "regions":    "us",
+                    "markets":    markets,
+                    "dateFormat": "iso",
+                    "oddsFormat": "american",
+                },
+                headers=HEADERS,
+                timeout=TIMEOUT,
+            )
+            props_resp.raise_for_status()
+            event_data = props_resp.json()
+        except Exception:
+            continue
+
+        for book in event_data.get("bookmakers", []):
+            for market in book.get("markets", []):
+                mkey = market.get("key", "")
+                target = ODDS_API_MARKET_MAP.get(mkey)
+                if not target:
+                    continue
+                for outcome in market.get("outcomes", []):
+                    oname = outcome.get("description", outcome.get("name", ""))
+                    if not _name_match(player_name, oname):
+                        continue
+                    point = outcome.get("point")
+                    if point is not None and target not in props:
+                        try:
+                            props[target] = float(point)
+                        except (TypeError, ValueError):
+                            pass
+            if props:
+                break  # stop after first bookmaker with data
+
+        if props:
+            break
+
+    return props
+
+
+def fetch_player_props(player_name: str, player_id: int = None) -> dict:
+    """
+    Try to fetch prop lines for a specific player.
+
+    Strategy:
+    1. Check in-memory cache (5-minute TTL).
+    2. Get today's scoreboard to find which game this player is in.
+    3. Try ESPN odds/items endpoint for each game.
+    4. If ODDS_API_KEY is set, also try The Odds API.
+    5. Fall back to {} if nothing found.
+
+    Returns {target_key: line_value}, e.g. {"pts": 24.5, "reb": 7.5}
+    """
+    cache_key = f"props_{_normalize_name(player_name)}_{date.today().isoformat()}"
+    cached = _cache_get(cache_key, PROPS_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    props: dict = {}
+
+    # Try ESPN props via today's scoreboard event IDs
+    today_str = date.today().strftime("%Y%m%d")
+    board = _get(ESPN_SCOREBOARD, params={"dates": today_str, "lang": "en", "region": "us"})
+    if not board:
+        board = _get(ESPN_SCOREBOARD)
+
+    events = board.get("events", [])
+    for event in events:
+        event_id = event.get("id", "")
+        if not event_id:
+            continue
+        espn_props = _fetch_espn_props(event_id, player_name)
+        if espn_props:
+            props.update(espn_props)
+            break
+
+    # If ESPN gave nothing, try The Odds API
+    if not props:
+        odds_api_props = _fetch_odds_api_props(player_name)
+        if odds_api_props:
+            props.update(odds_api_props)
+
+    _cache_set(cache_key, props)
+    return props
+
+
+def compute_edge(predicted: float, line: float, target: str) -> dict:
+    """
+    Given a model prediction and sportsbook line, compute edge metrics.
+
+    Parameters
+    ----------
+    predicted : float
+        Model's predicted stat value.
+    line : float
+        Sportsbook line (over/under point).
+    target : str
+        Target key (e.g. "pts", "reb").
+
+    Returns
+    -------
+    dict with keys:
+        line        : float — the line used
+        edge_abs    : float — predicted - line
+        edge_pct    : float — edge_abs / line * 100
+        direction   : str   — "OVER" or "UNDER"
+        has_live_line: bool — True if line came from ESPN/API, False if default
+    """
+    default_line = DEFAULT_LINES.get(target, line)
+    has_live_line = abs(line - default_line) > 0.01  # non-default → live
+
+    edge_abs = round(predicted - line, 2)
+    edge_pct = round(edge_abs / line * 100, 1) if line != 0 else 0.0
+    direction = "OVER" if edge_abs >= 0 else "UNDER"
 
     return {
-        "is_starter": bool(row.get("is_starter", False)),
-        "role":        role,
-        "multiplier":  multiplier,
-        "confirmed":   bool(row.get("starter_confirmed", False)),
+        "line":          line,
+        "edge_abs":      edge_abs,
+        "edge_pct":      edge_pct,
+        "direction":     direction,
+        "has_live_line": has_live_line,
     }
 
 
-def get_team_starters(team_abbr: str,
-                       lineup_df: pd.DataFrame = None) -> list:
-    """Get confirmed starters for a team — useful for opponent context."""
-    if lineup_df is None:
-        lineup_df = fetch_all_lineups()
+def get_line_for_target(player_name: str, target: str,
+                         player_id: int = None) -> tuple:
+    """
+    Convenience: return (line_value, has_live_line) for a player/target combo.
+    Only attempts live fetch when ODDS_API_KEY is set; otherwise returns (None, False)
+    so the caller falls back to the default threshold.
+    """
+    # Without an API key ESPN props aren't available — skip the network call
+    if not os.environ.get("ODDS_API_KEY", ""):
+        return None, False
+    props = fetch_player_props(player_name, player_id)
+    if target in props:
+        return props[target], True
+    return None, False
 
-    if lineup_df.empty:
-        return []
 
-    team = lineup_df[
-        (lineup_df["team_abbr"].str.upper() == team_abbr.upper()) &
-        (lineup_df["is_starter"] == True)
-    ]
-    return team["player_name"].tolist()
-
+# ── CLI test ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    df = fetch_all_lineups()
-    print(f"\nTotal players: {len(df)}")
-    if not df.empty:
-        print("\nConfirmed starters:")
-        starters = df[df["is_starter"] & df["starter_confirmed"]]
-        print(starters[["player_name","team_abbr","role"]].to_string(index=False))
+    print("=== Today's NBA Odds ===")
+    odds = fetch_today_odds()
+    if odds:
+        for team, info in sorted(odds.items()):
+            spread = info.get("spread")
+            total  = info.get("total")
+            print(f"  {team}: spread={spread}, total={total}")
+    else:
+        print("  No odds available today.")
+
+    print("\n=== Player Props (LeBron James) ===")
+    props = fetch_player_props("LeBron James")
+    if props:
+        for tgt, val in props.items():
+            print(f"  {tgt}: {val}")
+    else:
+        print("  No props found (ESPN may not have today's lines yet).")
+
+    print("\n=== Edge Calculation ===")
+    edge = compute_edge(predicted=28.3, line=26.5, target="pts")
+    for k, v in edge.items():
+        print(f"  {k}: {v}")
