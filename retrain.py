@@ -77,13 +77,16 @@ def run_retrain(force: bool = False, data_only: bool = False):
 
     # Step 3: Retrain models
     _log("Step 3/3: Retraining models...")
-    from models.train import train_all
-    results = train_all()
+    from models.train import main as _train_main
+    results = _train_main()
 
     _log("Retraining complete!")
-    _log(f"Targets trained: {len(results)}")
-    for target, metrics in results.items():
-        _log(f"  {target:<20} MAE {metrics['cv_mae']:.3f} | AUC {metrics['cv_auc']:.4f}")
+    if isinstance(results, dict):
+        _log(f"Targets trained: {len(results)}")
+        for target, metrics in results.items():
+            mae = metrics.get("cv_mae", metrics.get("mae", "?"))
+            auc = metrics.get("cv_auc", metrics.get("auc", "?"))
+            _log(f"  {target:<20} MAE {mae:.3f} | AUC {auc:.4f}" if isinstance(mae, float) else f"  {target}")
 
     # Run a quick backtest after retraining
     _log("\nRunning post-retrain backtest (7 days)...")
