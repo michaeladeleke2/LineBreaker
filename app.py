@@ -58,6 +58,24 @@ except ImportError:
     def get_team_defensive_rankings(*a): return {}
 
 try:
+    from data.underdog_tracker import (
+        log_pick as ud_log_pick,
+        resolve_pick as ud_resolve_pick,
+        auto_resolve_all as ud_auto_resolve,
+        get_picks as ud_get_picks,
+        get_stats as ud_get_stats,
+        delete_pick as ud_delete_pick,
+    )
+    from data.bias_correction import (
+        update_bias_from_picks as update_bias,
+        get_all_corrections,
+        get_player_bias_summary,
+    )
+    UNDERDOG_ENABLED = True
+except ImportError:
+    UNDERDOG_ENABLED = False
+
+try:
     from models.predict import get_matchup_history
     MATCHUP_ENABLED = True
 except ImportError:
@@ -92,50 +110,41 @@ _favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
 st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
 
-# ── Splash — injected immediately via JS so it shows before Streamlit renders ──
+# ── Splash — CSS-only, renders in main doc so it appears immediately ────────────
 if _LOGO_B64:
-    components.html(f"""
-<script>
-(function(){{
-    if (window.parent.document.getElementById('lb-splash-js')) return;
-    var s = window.parent.document.createElement('style');
-    s.textContent = `
-        #lb-splash-js {{
-            position:fixed;inset:0;background:#080810;z-index:99999;
-            display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.6rem;
-            opacity:1;transition:opacity 0.7s ease;pointer-events:none;
-        }}
-        #lb-splash-js img {{
-            height:240px;width:auto;object-fit:contain;
-            animation:lbScale 0.8s cubic-bezier(0.22,1,0.36,1) 0.05s both;
-        }}
-        #lb-splash-js .sp-tagline {{
-            font-family:'Inter',sans-serif;font-size:0.65rem;font-weight:700;
-            letter-spacing:0.3em;text-transform:uppercase;color:#f0672a;
-            opacity:0;animation:lbFade 0.5s ease 0.7s forwards;
-        }}
-        #lb-splash-js .sp-bar {{
-            width:0;height:2px;background:#f0672a;border-radius:2px;opacity:0;
-            animation:lbBar 0.7s ease 1s forwards;
-        }}
-        @keyframes lbScale  {{ from{{transform:scale(0.75);opacity:0}} to{{transform:scale(1);opacity:1}} }}
-        @keyframes lbFade   {{ from{{opacity:0;transform:translateY(8px)}} to{{opacity:1;transform:translateY(0)}} }}
-        @keyframes lbBar    {{ from{{width:0;opacity:0}} to{{width:72px;opacity:0.7}} }}
-    `;
-    window.parent.document.head.appendChild(s);
-    var d = window.parent.document.createElement('div');
-    d.id = 'lb-splash-js';
-    d.innerHTML = '<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
-        + '<div class="sp-tagline">Beat the Line. Break the Line.</div>'
-        + '<div class="sp-bar"></div>';
-    window.parent.document.body.prepend(d);
-    setTimeout(function(){{
-        d.style.opacity='0';
-        setTimeout(function(){{ if(d.parentNode) d.parentNode.removeChild(d); }}, 750);
-    }}, 2800);
-}})();
-</script>
-""", height=0)
+    st.markdown(f"""
+<style>
+#lb-splash {{
+    position:fixed;inset:0;background:#080810;z-index:99999;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:1.8rem;pointer-events:none;
+    animation:lbSplashOut 0.7s ease 3.5s forwards;
+}}
+#lb-splash img {{
+    height:260px;width:auto;object-fit:contain;
+    filter:drop-shadow(0 0 40px rgba(240,103,42,0.35));
+    animation:lbSplashScale 0.9s cubic-bezier(0.22,1,0.36,1) 0.05s both;
+}}
+#lb-splash .sp-tagline {{
+    font-family:'Inter',sans-serif;font-size:0.7rem;font-weight:700;
+    letter-spacing:0.32em;text-transform:uppercase;color:#f0672a;
+    opacity:0;animation:lbSplashFade 0.5s ease 0.75s forwards;
+}}
+#lb-splash .sp-bar {{
+    width:0;height:2px;background:linear-gradient(90deg,transparent,#f0672a,transparent);
+    border-radius:2px;opacity:0;animation:lbSplashBar 0.8s ease 1.1s forwards;
+}}
+@keyframes lbSplashOut   {{ 0%{{opacity:1;visibility:visible}} 100%{{opacity:0;visibility:hidden}} }}
+@keyframes lbSplashScale {{ from{{transform:scale(0.7);opacity:0}} to{{transform:scale(1);opacity:1}} }}
+@keyframes lbSplashFade  {{ from{{opacity:0;transform:translateY(10px)}} to{{opacity:1;transform:translateY(0)}} }}
+@keyframes lbSplashBar   {{ from{{width:0;opacity:0}} to{{width:80px;opacity:0.8}} }}
+</style>
+<div id="lb-splash">
+    <img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker">
+    <div class="sp-tagline">Beat the Line. Break the Line.</div>
+    <div class="sp-bar"></div>
+</div>
+""", unsafe_allow_html=True)
 
 st.markdown("""
 <style>
@@ -154,11 +163,16 @@ section[data-testid="stMain"] { background:#080810 !important; }
 .lb-nav {
     display:flex; align-items:center; justify-content:space-between;
     background:#080810; border-bottom:1px solid #1a1a2e;
-    padding:0 2rem; height:80px; position:sticky; top:0; z-index:100;
+    padding:0 2rem; height:96px; position:sticky; top:0; z-index:100;
 }
 .lb-logo { display:flex; align-items:center; gap:0.5rem; }
-.lb-logo img { height:72px; width:auto; object-fit:contain; display:block; }
-.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:2rem; color:#f0672a; letter-spacing:0.05em; }
+.lb-logo img {
+    height:88px; width:auto; object-fit:contain; display:block;
+    filter:drop-shadow(0 2px 12px rgba(240,103,42,0.4));
+    transition:filter 0.2s ease;
+}
+.lb-logo img:hover { filter:drop-shadow(0 2px 20px rgba(240,103,42,0.7)); }
+.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:2.4rem; color:#f0672a; letter-spacing:0.05em; }
 
 /* Splash screen */
 #lb-splash {
@@ -257,8 +271,9 @@ div[data-baseweb="select"] > div {
 
 /* Mobile responsive */
 @media (max-width: 768px) {
-    .lb-nav { padding:0 1rem; height:44px; }
-    .lb-logo { font-size:1.4rem; }
+    .lb-nav { padding:0 1rem; height:60px; }
+    .lb-logo img { height:52px; }
+    .lb-logo span { font-size:1.6rem; }
     .lb-ticker-wrap { display:none; }
     .lb-body { padding:0.8rem 0.8rem 3rem; }
     .block-container { padding:0 !important; }
@@ -550,7 +565,7 @@ st.markdown(f"""<div class="lb-nav">
 </div>""", unsafe_allow_html=True)
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-nba_tab, picks_tab, accuracy_tab, nfl_tab = st.tabs(["🏀  NBA Props", "⚡  Quick Picks", "📈  Accuracy", "🏈  NFL Props"])
+nba_tab, picks_tab, accuracy_tab, ud_tab, nfl_tab = st.tabs(["🏀  NBA Props", "⚡  Quick Picks", "📈  Accuracy", "🐶  Underdog", "🏈  NFL Props"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 with nba_tab:
@@ -2050,6 +2065,153 @@ with accuracy_tab:
                                 st.error(f"Error: {e}")
                 else:
                     st.info("No pending picks to resolve.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UNDERDOG TAB
+# ══════════════════════════════════════════════════════════════════════════════
+with ud_tab:
+    _lbl = '<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#f0672a;margin-bottom:0.6rem;">'
+
+    if not UNDERDOG_ENABLED:
+        st.info("Underdog tracker module not loaded.")
+    else:
+        # ── Stats banner ──────────────────────────────────────────────────────
+        _ud_stats = ud_get_stats()
+        _ud_total = _ud_stats.get("total", 0)
+        _ud_wins  = _ud_stats.get("wins", 0)
+        _ud_losses= _ud_stats.get("losses", 0)
+        _ud_wr    = _ud_stats.get("win_rate", 0.0)
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Total Picks", _ud_total)
+        c2.metric("Wins", _ud_wins)
+        c3.metric("Losses", _ud_losses)
+        c4.metric("Win Rate", f"{_ud_wr:.1f}%")
+
+        st.divider()
+
+        # ── Log a new pick ────────────────────────────────────────────────────
+        with st.expander("➕  Log a New Underdog Pick", expanded=_ud_total == 0):
+            st.markdown(_lbl + "Log Pick</div>", unsafe_allow_html=True)
+            all_players_ud = get_players_for_ui()
+            _ud_c1, _ud_c2 = st.columns(2)
+            with _ud_c1:
+                ud_player  = st.selectbox("Player", all_players_ud, key="ud_player")
+                ud_stat_lbl= st.selectbox("Stat", [v["label"] for v in TARGET_DISPLAY.values()], key="ud_stat_lbl")
+                ud_stat    = next((k for k,v in TARGET_DISPLAY.items() if v["label"]==ud_stat_lbl), "pts")
+            with _ud_c2:
+                ud_line    = st.number_input("Underdog Line", min_value=0.0, max_value=200.0, value=20.0, step=0.5, key="ud_line")
+                ud_dir     = st.radio("Direction", ["OVER","UNDER"], horizontal=True, key="ud_dir")
+                ud_pred    = st.number_input("Your Model Prediction (optional)", min_value=0.0, max_value=200.0, value=0.0, step=0.5, key="ud_pred")
+            ud_notes = st.text_input("Notes (optional)", key="ud_notes")
+            if st.button("Log Pick", type="primary", key="ud_log_btn"):
+                _pred_val = ud_pred if ud_pred > 0 else None
+                _pid = ud_log_pick(
+                    player=ud_player, team="", opponent="",
+                    stat=ud_stat, stat_label=ud_stat_lbl,
+                    line=ud_line, direction=ud_dir,
+                    predicted=_pred_val, notes=ud_notes,
+                )
+                st.success(f"✅ Logged pick #{_pid[:8]} — {ud_player} {ud_dir} {ud_line} {ud_stat_lbl}")
+                st.rerun()
+
+        # ── Auto-resolve ──────────────────────────────────────────────────────
+        _r1, _r2 = st.columns([3,1])
+        with _r2:
+            if st.button("🔄 Auto-Resolve from ESPN", use_container_width=True, key="ud_autoresolve"):
+                with st.spinner("Fetching results from ESPN…"):
+                    _resolved = ud_auto_resolve()
+                if _resolved > 0:
+                    update_bias()  # retrain bias correction with new resolved picks
+                    st.success(f"✅ Resolved {_resolved} pick(s) — bias correction updated!")
+                else:
+                    st.info("No new picks resolved (games may not be final yet).")
+                st.rerun()
+        with _r1:
+            st.markdown(_lbl + "Pick History</div>", unsafe_allow_html=True)
+
+        # ── Pick table ────────────────────────────────────────────────────────
+        _ud_picks = ud_get_picks(days=90)
+        if not _ud_picks:
+            st.info("No picks logged yet. Add your first Underdog pick above!")
+        else:
+            _outcome_icon = {"W":"✅","L":"❌","P":"➖",None:"⏳"}
+            _ud_rows = []
+            for p in _ud_picks:
+                _ud_rows.append({
+                    "Date":      p.get("date",""),
+                    "Player":    p.get("player",""),
+                    "Stat":      p.get("stat_label", p.get("stat","")),
+                    "Line":      p.get("line",""),
+                    "Direction": p.get("direction",""),
+                    "Predicted": p.get("predicted",""),
+                    "Actual":    p.get("actual",""),
+                    "Result":    _outcome_icon.get(p.get("outcome"), "⏳"),
+                    "id":        p.get("id",""),
+                })
+            _ud_df = pd.DataFrame(_ud_rows)
+
+            # ── Manual resolve for unresolved picks ───────────────────────────
+            _unresolved = [p for p in _ud_picks if p.get("outcome") is None]
+            if _unresolved:
+                with st.expander(f"✏️  Manually Resolve ({len(_unresolved)} pending)"):
+                    for _up in _unresolved:
+                        _mc1, _mc2, _mc3 = st.columns([3,2,1])
+                        with _mc1:
+                            st.markdown(f"**{_up['player']}** {_up['direction']} {_up['line']} {_up.get('stat_label',_up.get('stat',''))}")
+                        with _mc2:
+                            _actual_val = st.number_input(
+                                "Actual", min_value=0.0, max_value=200.0, value=0.0, step=0.5,
+                                key=f"ud_actual_{_up['id']}")
+                        with _mc3:
+                            if st.button("Resolve", key=f"ud_res_{_up['id']}"):
+                                ud_resolve_pick(_up["id"], _actual_val)
+                                update_bias()
+                                st.success("Resolved!")
+                                st.rerun()
+
+            # Show table
+            st.dataframe(
+                _ud_df.drop(columns=["id"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # CSV export
+            _ud_csv = _ud_df.drop(columns=["id"]).to_csv(index=False)
+            st.download_button("⬇️ Export CSV", _ud_csv, "underdog_picks.csv", "text/csv", key="ud_csv_dl")
+
+        st.divider()
+
+        # ── Bias corrections learned ──────────────────────────────────────────
+        with st.expander("🧠  Learned Bias Corrections"):
+            st.markdown(_lbl + "Model learns from your resolved picks to auto-correct future predictions</div>", unsafe_allow_html=True)
+            _corr = get_all_corrections()
+            if not _corr:
+                st.info("No corrections yet — resolve at least 3 picks per player/stat to build corrections.")
+            else:
+                _corr_rows = []
+                for _pname, _stats in _corr.items():
+                    for _sname, _val in _stats.items():
+                        _corr_rows.append({
+                            "Player": _pname,
+                            "Stat":   _sname,
+                            "Correction": f"{'+' if _val>=0 else ''}{_val:.2f}",
+                            "Direction": "↑ Model under-predicts" if _val>0 else "↓ Model over-predicts",
+                        })
+                if _corr_rows:
+                    st.dataframe(pd.DataFrame(_corr_rows), use_container_width=True, hide_index=True)
+
+        # ── By-stat breakdown ─────────────────────────────────────────────────
+        if _ud_stats.get("by_stat"):
+            with st.expander("📊  Performance by Stat"):
+                _stat_rows = [
+                    {"Stat": s, "Picks": v["total"], "Wins": v["wins"],
+                     "Win Rate": f"{v['win_rate']:.1f}%"}
+                    for s,v in sorted(_ud_stats["by_stat"].items(), key=lambda x:-x[1]["win_rate"])
+                ]
+                st.dataframe(pd.DataFrame(_stat_rows), use_container_width=True, hide_index=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NFL TAB
