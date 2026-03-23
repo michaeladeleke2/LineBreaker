@@ -2289,7 +2289,7 @@ with ud_tab:
                             st.rerun()
 
             # CSV export
-            _ud_csv = _ud_df.drop(columns=["id"]).to_csv(index=False)
+            _ud_csv = pd.DataFrame(_ud_rows).to_csv(index=False)
             st.download_button("⬇️ Export CSV", _ud_csv, "underdog_picks.csv", "text/csv", key="ud_csv_dl")
 
         st.divider()
