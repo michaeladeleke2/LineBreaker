@@ -429,7 +429,10 @@ def predict(
     for c in feature_cols:
         if c not in feat_row.columns:
             feat_row[c] = 0.0
-    feat_row = feat_row[feature_cols]
+    # Drop duplicate columns before selection (prevents XGBoost dtype error)
+    feat_row = feat_row.loc[:, ~feat_row.columns.duplicated()]
+    feature_cols = [c for c in feature_cols if c in feat_row.columns]
+    feat_row = feat_row[feature_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     # Recent form
     recent_games = get_recent_form(player_id, n=10, preloaded_gamelogs=preloaded_gamelogs)

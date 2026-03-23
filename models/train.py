@@ -240,6 +240,16 @@ def main(targets: list = None, force_refresh: bool = False):
         all_targets = [t for t in all_targets if t in targets]
 
     df = fm.sort_values("game_date").reset_index(drop=True)
+
+    # Drop duplicate columns — XGBoost returns a DataFrame (not Series) for
+    # duplicated column names, causing an AttributeError on .dtype
+    df = df.loc[:, ~df.columns.duplicated()]
+    feature_cols = [c for c in feature_cols if c in df.columns]
+
+    # Ensure all feature columns are numeric
+    for _fc in feature_cols:
+        df[_fc] = pd.to_numeric(df[_fc], errors="coerce").fillna(0.0)
+
     X  = df[feature_cols]
 
     print(f"  Rows: {len(df):,}  |  Features: {len(feature_cols)}  |  Targets: {len(all_targets)}")
