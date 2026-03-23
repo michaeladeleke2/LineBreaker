@@ -718,19 +718,57 @@ with nba_tab:
                     except Exception as e:
                         st.error(f"❌ {e}")
 
-            if st.button("🤖 Retrain", use_container_width=True,
-                         help="Retrain all models (~15 min, runs in background)"):
+            if st.button("🤖 Retrain Models", use_container_width=True,
+                         help="Retrain all 16 XGBoost models with latest data (~15 min)"):
                 try:
-                    import subprocess
-                    retrain_path = str(ROOT / "retrain.py")
+                    import subprocess as _sp
+                    _log_path = ROOT / "logs" / "retrain.log"
                     (ROOT / "logs").mkdir(exist_ok=True)
-                    subprocess.Popen(
-                        [sys.executable, retrain_path, "--force"],
-                        stdout=open(ROOT / "logs" / "retrain.log", "a"),
-                        stderr=subprocess.STDOUT, cwd=str(ROOT))
-                    st.info("🤖 Retraining started in background")
+                    _log_path.write_text("")           # clear old log
+                    _proc = _sp.Popen(
+                        [sys.executable, str(ROOT / "retrain.py"), "--force"],
+                        stdout=open(_log_path, "a"),
+                        stderr=_sp.STDOUT, cwd=str(ROOT))
+                    st.session_state["retrain_pid"]     = _proc.pid
+                    st.session_state["retrain_running"] = True
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ {e}")
+
+            # ── Live retrain progress ─────────────────────────────────────────
+            if st.session_state.get("retrain_running"):
+                import subprocess as _sp2
+                _log_path2 = ROOT / "logs" / "retrain.log"
+                _pid       = st.session_state.get("retrain_pid")
+
+                _alive = False
+                try:
+                    if _pid:
+                        _sp2.run(["kill", "-0", str(_pid)], check=True, capture_output=True)
+                        _alive = True
+                except Exception:
+                    _alive = False
+
+                _lines = []
+                if _log_path2.exists():
+                    _lines = [l for l in _log_path2.read_text(errors="replace").splitlines() if l.strip()][-25:]
+
+                if _alive:
+                    st.info("🔄 Retraining… this takes ~15 min. Log updates every 5 sec.")
+                else:
+                    _had_error = any("error" in l.lower() or "traceback" in l.lower() for l in _lines)
+                    if _had_error:
+                        st.error("❌ Retrain finished with errors — see log below")
+                    else:
+                        st.success("✅ Retrain complete! Restart the app to load new models.")
+                    st.session_state["retrain_running"] = False
+
+                if _lines:
+                    with st.expander(f"📋 Retrain log {'(live 🔴)' if _alive else '(done)'}", expanded=True):
+                        st.code("\n".join(_lines), language=None)
+
+                if _alive:
+                    import time as _t2; _t2.sleep(5); st.rerun()
 
         if st.button("📊 Backtest (30d)", use_container_width=True,
                      help="Check prediction accuracy vs actual results"):
