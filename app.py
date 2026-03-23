@@ -673,6 +673,12 @@ with nba_tab:
 
         run_btn = st.button("▶  Run Prediction", use_container_width=True, type="primary")
 
+        # Clear cached result when player / stat / opponent changes
+        _cache_key = f"{sel_player}|{sel_target}|{sel_opp}|{location}"
+        if st.session_state.get("_pred_cache_key") != _cache_key:
+            st.session_state.pop("_pred_result", None)
+            st.session_state["_pred_cache_key"] = _cache_key
+
         # ── System buttons ────────────────────────────────────────────────────
         st.divider()
         st.caption("SYSTEM")
@@ -755,7 +761,9 @@ with nba_tab:
 
     # ── Output ────────────────────────────────────────────────────────────────
     with right:
-        if not run_btn:
+        # Show placeholder when no result yet; show card if result cached or just run
+        _has_result = run_btn or ("_pred_result" in st.session_state)
+        if not _has_result:
             _ph_logo = (
                 f"<img src='data:image/png;base64,{_LOGO_B64}' style='height:88px;width:auto;object-fit:contain;opacity:0.18;margin-bottom:1.2rem;display:block;'/>"
                 if _LOGO_B64 else
@@ -785,17 +793,26 @@ with nba_tab:
             p_row = players_df[players_df["full_name"]==sel_player].iloc[0]
             o_row = teams_df[teams_df["team_abbreviation"]==sel_opp].iloc[0]
 
-            with st.spinner(f"Predicting {sel_player}..."):
-                try:
-                    result = predict(
-                        player_id=int(p_row["id"]),
-                        opponent_team_id=int(o_row["team_id"]),
-                        opponent_name=sel_opp,
-                        is_home=(location=="Home"),
-                        rest_days=rest_days,
-                    )
-                except Exception as e:
-                    st.error(f"Prediction error: {e}")
+            if run_btn:
+                # Fresh prediction — run model and cache result
+                with st.spinner(f"Predicting {sel_player}..."):
+                    try:
+                        result = predict(
+                            player_id=int(p_row["id"]),
+                            opponent_team_id=int(o_row["team_id"]),
+                            opponent_name=sel_opp,
+                            is_home=(location=="Home"),
+                            rest_days=rest_days,
+                        )
+                        st.session_state["_pred_result"] = result
+                    except Exception as e:
+                        st.error(f"Prediction error: {e}")
+                        st.stop()
+            else:
+                # Button click (parlay / log / etc) — reload from cache
+                result = st.session_state.get("_pred_result")
+                if result is None:
+                    st.warning("Run a prediction first.")
                     st.stop()
 
             tr = result.targets.get(sel_target)
@@ -1289,28 +1306,31 @@ with nba_tab:
                     )
                     st.success("✅ Pick logged! Check Accuracy tab to track results.")
             with ud_col:
-                if UNDERDOG_ENABLED and st.button("🐶 Log to Underdog", use_container_width=True,
+                if UNDERDOG_ENABLED and st.button("🐶 Log to Underdog", key="ud_log_card_btn",
+                             use_container_width=True,
                              help="Log this pick to your Underdog tracker — prediction pre-filled"):
-                    _ud_dir = "OVER" if op > 50 else "UNDER"
-                    # find today's game_id for this player's team
-                    _ud_gid = next(
-                        (g.get("game_id") for g in today_slate
-                         if g.get("home_abbr") == p_row.get("team_abbreviation","")
-                         or g.get("away_abbr") == p_row.get("team_abbreviation","")),
-                        None
-                    )
-                    ud_log_pick(
-                        player    = result.player_name,
-                        team      = str(p_row.get("team_abbreviation", "")),
-                        opponent  = sel_opp,
-                        stat      = sel_target,
-                        stat_label= target_info["label"],
-                        line      = float(custom_line),
-                        direction = _ud_dir,
-                        predicted = float(tr.predicted_value),
-                        game_id   = _ud_gid,
-                    )
-                    st.success(f"🐶 Logged! {result.player_name} {_ud_dir} {custom_line} {target_info['label']} (model: {tr.predicted_value})")
+                    try:
+                        _ud_dir = "OVER" if op > 50 else "UNDER"
+                        _ud_gid = next(
+                            (g.get("game_id") for g in today_slate
+                             if g.get("home_abbr") == str(p_row.get("team_abbreviation","")).upper()
+                             or g.get("away_abbr") == str(p_row.get("team_abbreviation","")).upper()),
+                            None
+                        )
+                        ud_log_pick(
+                            player    = result.player_name,
+                            team      = str(p_row.get("team_abbreviation", "")),
+                            opponent  = sel_opp,
+                            stat      = sel_target,
+                            stat_label= target_info["label"],
+                            line      = float(custom_line),
+                            direction = _ud_dir,
+                            predicted = float(tr.predicted_value),
+                            game_id   = _ud_gid,
+                        )
+                        st.success(f"🐶 Logged! {result.player_name} {_ud_dir} {custom_line} {target_info['label']} (model: {tr.predicted_value:.1f})")
+                    except Exception as _ud_err:
+                        st.error(f"Log failed: {_ud_err}")
             with share_col:
                 share_text = (
                     f"🏀 LineBreaker Prediction\n"
