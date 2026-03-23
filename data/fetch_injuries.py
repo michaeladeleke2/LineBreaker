@@ -109,33 +109,60 @@ def fetch_injury_report(force_refresh: bool = False) -> pd.DataFrame:
     return df
 
 
+def _name_similarity(a: str, b: str) -> float:
+    """
+    Return 0-1 similarity between two player name strings.
+    Prefers exact match, then first+last match, then last-name-only as last resort.
+    """
+    a, b = a.lower().strip(), b.lower().strip()
+    if a == b:
+        return 1.0
+    a_parts, b_parts = a.split(), b.split()
+    a_last = a_parts[-1] if a_parts else ""
+    b_last = b_parts[-1] if b_parts else ""
+    a_first = a_parts[0] if a_parts else ""
+    b_first = b_parts[0] if b_parts else ""
+    # Both first AND last name must match for a confident hit
+    if a_last == b_last and len(a_last) > 2:
+        if a_first == b_first:
+            return 0.95   # first + last match
+        if a_first and b_first and (a_first[0] == b_first[0]):
+            return 0.7    # first initial + last match
+        # Last name only — only use if last name is distinctive (len > 5)
+        return 0.4 if len(a_last) > 5 else 0.0
+    return 0.0
+
+
 def get_player_injury(player_name: str,
                        injury_df: pd.DataFrame = None) -> dict:
     """
     Look up a specific player's injury status.
+    Uses full-name matching to avoid false positives from shared last names
+    (e.g. Jaylen Brown ≠ Moses Brown).
     Returns dict with status, multiplier, description.
     """
     if injury_df is None:
         injury_df = fetch_injury_report()
 
     if injury_df.empty:
-        return {"status": "unknown", "multiplier": 1.0, "description": ""}
-
-    # Fuzzy name match
-    mask = injury_df["player_name"].str.contains(
-        player_name.split()[-1],  # match on last name
-        case=False, na=False
-    )
-    matches = injury_df[mask]
-
-    if matches.empty:
         return {"status": "active", "multiplier": 1.0, "description": ""}
 
-    row = matches.iloc[0]
+    # Score every row and take the best match above threshold
+    best_score, best_row = 0.0, None
+    for _, row in injury_df.iterrows():
+        score = _name_similarity(player_name, str(row["player_name"]))
+        if score > best_score:
+            best_score, best_row = score, row
+
+    # Require confident match — last-name-only hits (score ~0.4) are rejected
+    # to avoid false positives like Jaylen Brown → Moses Brown
+    if best_score < 0.6 or best_row is None:
+        return {"status": "active", "multiplier": 1.0, "description": ""}
+
     return {
-        "status":      row["status"],
-        "multiplier":  float(row["multiplier"]),
-        "description": row["description"],
+        "status":      best_row["status"],
+        "multiplier":  float(best_row["multiplier"]),
+        "description": best_row["description"],
     }
 
 
