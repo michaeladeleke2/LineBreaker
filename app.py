@@ -2,7 +2,7 @@
 linebreaker/app.py — LineBreaker: NBA & NFL Prop Predictor
 Run: streamlit run app.py
 """
-import sys, warnings, math
+import sys, warnings, math, base64
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -11,6 +11,14 @@ import streamlit.components.v1 as components
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parent
 sys.path.append(str(ROOT))
+
+# ── Logo (base64 embed for reliable Streamlit serving) ────────────────────────
+def _logo_b64() -> str:
+    _p = ROOT / "assets" / "logo.png"
+    if _p.exists():
+        return base64.b64encode(_p.read_bytes()).decode()
+    return ""
+_LOGO_B64 = _logo_b64()
 
 from models.predict import predict, get_players_for_ui, get_teams_for_ui, get_available_targets, TARGET_DISPLAY, TARGET_GROUPS
 from features.engineer import DEFAULT_THRESHOLDS, COMBO_TARGETS
@@ -80,7 +88,8 @@ TEAM_COLORS = {
 
 def _headshot(pid): return f"https://cdn.nba.com/headshots/nba/latest/1040x760/{pid}.png"
 
-st.set_page_config(page_title="LineBreaker", page_icon="🏀",
+_favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
+st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -102,7 +111,9 @@ section[data-testid="stMain"] { background:#080810 !important; }
     background:#080810; border-bottom:1px solid #13131f;
     padding:0 2rem; height:52px; position:sticky; top:0; z-index:100;
 }
-.lb-logo { font-family:'Bebas Neue',sans-serif; font-size:1.9rem; color:#f0672a; letter-spacing:0.05em; }
+.lb-logo { display:flex; align-items:center; gap:0.5rem; }
+.lb-logo img { height:42px; width:auto; object-fit:contain; display:block; }
+.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:1.9rem; color:#f0672a; letter-spacing:0.05em; }
 .lb-ticker-wrap { flex:1; overflow:hidden; margin:0 1.5rem;
     mask-image:linear-gradient(90deg,transparent,black 8%,black 92%,transparent); }
 .lb-ticker-track { display:inline-flex; gap:2rem; white-space:nowrap; animation:tick 40s linear infinite; }
@@ -456,8 +467,13 @@ ti  = "".join(f'<span class="lb-tick">{n}&nbsp;<span class="{c}">{s}</span></spa
 td  = ti * 2
 
 # ── Nav ───────────────────────────────────────────────────────────────────────
+_logo_html = (
+    f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
+    if _LOGO_B64 else
+    '<span>LineBreaker</span>'
+)
 st.markdown(f"""<div class="lb-nav">
-    <div class="lb-logo">LineBreaker</div>
+    <div class="lb-logo">{_logo_html}</div>
     <div class="lb-ticker-wrap"><div class="lb-ticker-track">{td}</div></div>
     <div class="lb-nav-right">
         <div class="lb-badge">NBA &amp; NFL Props</div>
