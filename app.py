@@ -92,6 +92,51 @@ _favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
 st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
 
+# ── Splash — injected immediately via JS so it shows before Streamlit renders ──
+if _LOGO_B64:
+    components.html(f"""
+<script>
+(function(){{
+    if (window.parent.document.getElementById('lb-splash-js')) return;
+    var s = window.parent.document.createElement('style');
+    s.textContent = `
+        #lb-splash-js {{
+            position:fixed;inset:0;background:#080810;z-index:99999;
+            display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.6rem;
+            opacity:1;transition:opacity 0.7s ease;pointer-events:none;
+        }}
+        #lb-splash-js img {{
+            height:240px;width:auto;object-fit:contain;
+            animation:lbScale 0.8s cubic-bezier(0.22,1,0.36,1) 0.05s both;
+        }}
+        #lb-splash-js .sp-tagline {{
+            font-family:'Inter',sans-serif;font-size:0.65rem;font-weight:700;
+            letter-spacing:0.3em;text-transform:uppercase;color:#f0672a;
+            opacity:0;animation:lbFade 0.5s ease 0.7s forwards;
+        }}
+        #lb-splash-js .sp-bar {{
+            width:0;height:2px;background:#f0672a;border-radius:2px;opacity:0;
+            animation:lbBar 0.7s ease 1s forwards;
+        }}
+        @keyframes lbScale  {{ from{{transform:scale(0.75);opacity:0}} to{{transform:scale(1);opacity:1}} }}
+        @keyframes lbFade   {{ from{{opacity:0;transform:translateY(8px)}} to{{opacity:1;transform:translateY(0)}} }}
+        @keyframes lbBar    {{ from{{width:0;opacity:0}} to{{width:72px;opacity:0.7}} }}
+    `;
+    window.parent.document.head.appendChild(s);
+    var d = window.parent.document.createElement('div');
+    d.id = 'lb-splash-js';
+    d.innerHTML = '<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
+        + '<div class="sp-tagline">Beat the Line. Break the Line.</div>'
+        + '<div class="sp-bar"></div>';
+    window.parent.document.body.prepend(d);
+    setTimeout(function(){{
+        d.style.opacity='0';
+        setTimeout(function(){{ if(d.parentNode) d.parentNode.removeChild(d); }}, 750);
+    }}, 2800);
+}})();
+</script>
+""", height=0)
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap');
@@ -108,12 +153,12 @@ section[data-testid="stMain"] { background:#080810 !important; }
 /* Nav */
 .lb-nav {
     display:flex; align-items:center; justify-content:space-between;
-    background:#080810; border-bottom:1px solid #13131f;
-    padding:0 2rem; height:68px; position:sticky; top:0; z-index:100;
+    background:#080810; border-bottom:1px solid #1a1a2e;
+    padding:0 2rem; height:80px; position:sticky; top:0; z-index:100;
 }
 .lb-logo { display:flex; align-items:center; gap:0.5rem; }
-.lb-logo img { height:56px; width:auto; object-fit:contain; display:block; }
-.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:1.9rem; color:#f0672a; letter-spacing:0.05em; }
+.lb-logo img { height:72px; width:auto; object-fit:contain; display:block; }
+.lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:2rem; color:#f0672a; letter-spacing:0.05em; }
 
 /* Splash screen */
 #lb-splash {
@@ -222,33 +267,6 @@ div[data-baseweb="select"] > div {
 }
 </style>
 """, unsafe_allow_html=True)
-
-# ── Splash — injected AFTER the CSS block so animations are already defined ───
-if _LOGO_B64:
-    st.markdown(
-        f'<style>'
-        f'#lb-splash{{position:fixed;inset:0;background:#080810;z-index:99999;'
-        f'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.2rem;'
-        f'animation:splashFade 0.5s ease-out 2s forwards;pointer-events:none;}}'
-        f'#lb-splash img{{height:160px;width:auto;object-fit:contain;'
-        f'animation:splashScale 0.8s cubic-bezier(0.22,1,0.36,1) 0.05s both;}}'
-        f'#lb-splash .sp-sub{{font-size:0.62rem;font-weight:700;letter-spacing:0.28em;'
-        f'text-transform:uppercase;color:#f0672a;opacity:0;'
-        f'animation:splashFadeIn 0.5s ease 0.7s forwards;}}'
-        f'#lb-splash .sp-bar{{width:0;height:2px;background:#f0672a;border-radius:2px;opacity:0;'
-        f'animation:splashBar 0.7s ease 1s forwards;}}'
-        f'@keyframes splashScale{{from{{transform:scale(0.75);opacity:0}}to{{transform:scale(1);opacity:1}}}}'
-        f'@keyframes splashFadeIn{{from{{opacity:0;transform:translateY(8px)}}to{{opacity:1;transform:translateY(0)}}}}'
-        f'@keyframes splashBar{{from{{width:0;opacity:0}}to{{width:60px;opacity:0.6}}}}'
-        f'@keyframes splashFade{{from{{opacity:1}}to{{opacity:0;visibility:hidden}}}}'
-        f'</style>'
-        f'<div id="lb-splash">'
-        f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
-        f'<div class="sp-sub">Beat the Line. Break the Line.</div>'
-        f'<div class="sp-bar"></div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _lineup_badge(lineup_info):
@@ -910,14 +928,14 @@ with nba_tab:
             .sgrid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;flex:1;}}
             .sc{{background:#0d0d15;border-radius:10px;padding:10px 12px;}}
             .sv{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#e8e6e0;line-height:1;margin-bottom:2px;}}
-            .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .sl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .meter-col{{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding-bottom:4px;}}
-            .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .meter-lbl{{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .meter-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:{cco};}}
             /* Edge + bet row */
             .edge-row{{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;}}
             .edge-chip{{background:#0d0d15;border-radius:8px;padding:7px 12px;}}
-            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;}}
+            .ec-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;}}
             .ec-val{{font-family:'Bebas Neue',sans-serif;font-size:1.2rem;line-height:1;}}
             .bet-chip{{background:rgba({int(bet_c[1:3],16) if len(bet_c)>3 else 37},{int(bet_c[3:5],16) if len(bet_c)>5 else 37},{int(bet_c[5:7],16) if len(bet_c)>7 else 48},0.12);
                         border:1px solid {bet_c}44;border-radius:8px;padding:7px 14px;}}
@@ -925,12 +943,12 @@ with nba_tab:
             .bc-val{{font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{bet_c};line-height:1;}}
             /* Consistency bar */
             .cons-bar{{flex:1;min-width:120px;}}
-            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#1a1a28;margin-bottom:4px;}}
+            .cons-lbl{{font-size:8px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#4a4a6a;margin-bottom:4px;}}
             .cons-track{{height:4px;background:#0d0d15;border-radius:2px;overflow:hidden;}}
             .cons-fill{{height:100%;background:linear-gradient(90deg,#e05a5a,#d4b44a,#4caf82);border-radius:2px;width:{int(consistency*100)}%;}}
             /* Over/under */
             .ou{{margin-bottom:16px;}}
-            .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#1a1a28;margin-bottom:10px;}}
+            .ot{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#4a4a6a;margin-bottom:10px;}}
             .or{{display:flex;align-items:center;gap:10px;margin-bottom:7px;}}
             .or:last-child{{margin-bottom:0;}}
             .ol{{font-size:11px;font-weight:500;color:#2a2a3a;min-width:72px;}}
@@ -1159,7 +1177,7 @@ with nba_tab:
                                         f'<div style="background:{bg};border-radius:6px;padding:6px 4px;'
                                         f'text-align:center;min-width:44px;">'
                                         f'<div style="font-family:\'Bebas Neue\',sans-serif;font-size:1rem;color:{fc};">{int(v)}</div>'
-                                        f'<div style="font-size:8px;color:#1a1a28;">{gd_lbl}</div>'
+                                        f'<div style="font-size:8px;color:#4a4a6a;">{gd_lbl}</div>'
                                         f'</div>'
                                     )
                                 st.markdown(
@@ -1204,15 +1222,15 @@ with nba_tab:
                             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.6rem;text-align:center;">
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};">{mh.get("avg","—")}</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Avg</div>
                                 </div>
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:#4caf82;">{mh.get("hit_rate_pct","—")}%</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Hit Rate</div>
                                 </div>
                                 <div>
                                     <div style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{mh_c};">{mh.get("n_games","—")}</div>
-                                    <div style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Games</div>
+                                    <div style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Games</div>
                                 </div>
                             </div>
                             <div style="font-size:0.62rem;color:#2a2a3a;margin-top:0.5rem;text-align:center;">
@@ -1235,7 +1253,7 @@ with nba_tab:
                             <div style="font-size:0.6rem;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#2a2a3a;">DraftKings DFS Projection</div>
                             <div style="font-family:'Bebas Neue',sans-serif;font-size:1.8rem;color:#f0672a;line-height:1;">{dfs_score} <span style="font-size:0.9rem;color:#252535;">pts</span></div>
                         </div>
-                        <div style="font-size:0.62rem;color:#1a1a28;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
+                        <div style="font-size:0.62rem;color:#4a4a6a;margin-left:auto;">PTS + REB×1.25 + AST×1.5<br>STL×2 + BLK×2 + TOV×-0.5 + 3PM×0.5</div>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -1609,12 +1627,12 @@ with picks_tab:
                                         &nbsp;&middot;&nbsp;<span style="color:#2a2a3a;">{trend}</span>
                                     </div>
                                     <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
-                                        <span style="font-size:8px;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Edge</span>
+                                        <span style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Edge</span>
                                         <div style="flex:1;height:2px;background:#1a1a28;border-radius:2px;overflow:hidden;">
                                             <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
                                         </div>
                                         <span style="font-size:9px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
-                                        <span style="font-size:8px;color:#1a1a28;">L5 {l5} &middot; L10 {l10}</span>
+                                        <span style="font-size:8px;color:#4a4a6a;">L5 {l5} &middot; L10 {l10}</span>
                                     </div>
                                 </div>
                             </div>
@@ -1732,11 +1750,11 @@ with picks_tab:
                         combo_prob *= op2 if p["direction"] == "OVER" else (1 - op2)
                     st.markdown(f"""
                     <div style="margin-top:0.8rem;display:flex;gap:1.5rem;">
-                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Hit Prob</span>
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Hit Prob</span>
                              <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#4caf82;">{combo_prob*100:.1f}%</div></div>
-                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">EV per 1u</span>
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">EV per 1u</span>
                              <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:{'#4caf82' if top_ev>=0 else '#e05a5a'};">{top_ev:+.2f}u</div></div>
-                        <div><span style="font-size:0.58rem;color:#1a1a28;text-transform:uppercase;letter-spacing:1px;">Avg Edge</span>
+                        <div><span style="font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Avg Edge</span>
                              <div style="font-family:'Bebas Neue',sans-serif;font-size:1.4rem;color:#f0672a;">{top_edge:.1f}x</div></div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -1997,7 +2015,7 @@ with accuracy_tab:
                         padding:0.5rem 0;border-bottom:1px solid #0d0d15;font-size:0.72rem;">
                 <div>{icon} <strong style="color:#e8e6e0;">{p["player_name"]}</strong>
                     <span style="color:#2a2a3a;margin-left:4px;">{tinfo.get("short","?")} {p["pick"]} {p["custom_line"]}</span>
-                    <span style="color:#1a1a28;">{note_txt}</span>
+                    <span style="color:#5a5a7a;">{note_txt}</span>
                 </div>
                 <div style="color:#2a2a3a;">{actual} · {p.get("game_date","")}</div>
             </div>

@@ -115,12 +115,17 @@ def generate_quick_picks(top_n=10, min_confidence=None, targets=None) -> pd.Data
 
                         threshold = DEFAULT_THRESHOLDS.get(target, tr.threshold)
                         edge_abs  = abs(float(tr.predicted_value) - threshold)
-                        edge_norm = round(edge_abs / max(float(tr.model_mae), 0.1), 2)
+                        mae       = float(tr.model_mae) if float(tr.model_mae) > 0 else 1.0
+                        edge_norm = round(edge_abs / max(mae, 0.1), 2)
                         direction = "OVER" if float(tr.predicted_value) >= threshold else "UNDER"
 
-                        mae  = float(tr.model_mae) if float(tr.model_mae) > 0 else 1.0
                         diff = (float(tr.predicted_value) - threshold) / mae
                         op   = round(1 / (1 + math.exp(-1.2 * diff)) * 100, 1)
+
+                        # Quality gate: require meaningful edge AND sufficient win probability
+                        win_prob = op if direction == "OVER" else (100 - op)
+                        if edge_norm < 1.2 or win_prob < 57:
+                            continue
 
                         # HOT/COLD trend
                         l5  = float(tr.recent_avg_5)
