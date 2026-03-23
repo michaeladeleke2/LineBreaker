@@ -112,6 +112,30 @@ def fetch_all_lineups(force_refresh: bool = False) -> pd.DataFrame:
     return df
 
 
+def _lineup_name_match(query: str, candidate: str) -> float:
+    """
+    Return similarity score (0-1) for player name matching.
+    Requires first + last name to match — avoids false positives like
+    Jaylen Brown → Bruce Brown.
+    """
+    q, c = query.lower().strip(), candidate.lower().strip()
+    if q == c:
+        return 1.0
+    q_parts, c_parts = q.split(), c.split()
+    q_last = q_parts[-1] if q_parts else ""
+    c_last = c_parts[-1] if c_parts else ""
+    q_first = q_parts[0] if q_parts else ""
+    c_first = c_parts[0] if c_parts else ""
+    if q_last != c_last or len(q_last) < 3:
+        return 0.0
+    # Last names match — require first name confirmation too
+    if q_first == c_first:
+        return 0.95
+    if q_first and c_first and q_first[0] == c_first[0]:
+        return 0.7
+    return 0.0   # same last name but different first → reject
+
+
 def get_player_lineup_status(player_name: str,
                               lineup_df: pd.DataFrame = None) -> dict:
     """Get lineup status for a player. Returns unknown if no data."""
@@ -124,15 +148,18 @@ def get_player_lineup_status(player_name: str,
     if lineup_df is None or lineup_df.empty:
         return default
 
-    last    = player_name.split()[-1]
-    matches = lineup_df[lineup_df["player_name"].str.contains(last, case=False, na=False)]
+    # Score every row — require confident full-name match (>= 0.6)
+    best_score, best_row = 0.0, None
+    for _, row in lineup_df.iterrows():
+        score = _lineup_name_match(player_name, str(row.get("player_name", "")))
+        if score > best_score:
+            best_score, best_row = score, row
 
-    if matches.empty:
+    if best_score < 0.6 or best_row is None:
         return default
 
-    confirmed = matches[matches["starter_confirmed"]]
-    row       = confirmed.iloc[0] if not confirmed.empty else matches.iloc[0]
-    role      = str(row.get("role", "unknown"))
+    row  = best_row
+    role = str(row.get("role", "unknown"))
 
     return {
         "is_starter": bool(row.get("is_starter", False)),
