@@ -462,6 +462,39 @@ def get_stats() -> dict:
     }
 
 
+def update_pick(pick_id: str, **kwargs) -> dict:
+    """
+    Update editable fields on a pick.
+    Allowed fields: player, team, opponent, stat, stat_label,
+                    line, direction, predicted, actual, notes, game_id.
+    Recomputes outcome if line/direction/actual change.
+    Returns updated pick or raises KeyError.
+    """
+    editable = {"player","team","opponent","stat","stat_label",
+                "line","direction","predicted","actual","notes","game_id"}
+    picks = _load()
+    for pick in picks:
+        if pick["id"] != pick_id:
+            continue
+        for k, v in kwargs.items():
+            if k in editable:
+                pick[k] = v
+        # Recompute outcome if we have enough info
+        if pick.get("actual") is not None and pick.get("line") is not None:
+            actual = float(pick["actual"])
+            line   = float(pick["line"])
+            diff   = actual - line
+            if abs(diff) <= 0.25:
+                pick["outcome"] = "P"
+            elif pick.get("direction","OVER") == "OVER":
+                pick["outcome"] = "W" if diff > 0 else "L"
+            else:
+                pick["outcome"] = "W" if diff < 0 else "L"
+        _save(picks)
+        return pick
+    raise KeyError(f"Pick not found: {pick_id}")
+
+
 def delete_pick(pick_id: str) -> bool:
     """
     Remove a pick by id.

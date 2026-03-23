@@ -49,7 +49,7 @@ def fetch_all_lineups(force_refresh: bool = False) -> pd.DataFrame:
     # Use cache if fresh (within 30 min)
     if cache_path.exists() and not force_refresh:
         age = (datetime.now() - datetime.fromtimestamp(cache_path.stat().st_mtime)).seconds
-        if age < 1800:
+        if age < 120:   # 2-minute cache for live game accuracy
             return pd.read_csv(cache_path)
 
     # Clean old lineup caches
