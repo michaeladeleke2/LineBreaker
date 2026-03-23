@@ -2093,10 +2093,16 @@ with ud_tab:
         # ── Log a new pick ────────────────────────────────────────────────────
         with st.expander("➕  Log a New Underdog Pick", expanded=_ud_total == 0):
             st.markdown(_lbl + "Log Pick</div>", unsafe_allow_html=True)
-            all_players_ud = get_players_for_ui()
+            _players_df_ud = get_players_for_ui()
+            _player_names_ud = sorted(_players_df_ud["full_name"].dropna().unique().tolist())
             _ud_c1, _ud_c2 = st.columns(2)
             with _ud_c1:
-                ud_player  = st.selectbox("Player", all_players_ud, key="ud_player")
+                ud_player = st.selectbox(
+                    "Player (type to search)",
+                    options=_player_names_ud,
+                    index=0,
+                    key="ud_player",
+                )
                 ud_stat_lbl= st.selectbox("Stat", [v["label"] for v in TARGET_DISPLAY.values()], key="ud_stat_lbl")
                 ud_stat    = next((k for k,v in TARGET_DISPLAY.items() if v["label"]==ud_stat_lbl), "pts")
             with _ud_c2:
