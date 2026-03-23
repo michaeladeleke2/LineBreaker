@@ -37,9 +37,12 @@ _CACHE_PATH = os.path.join(_DIR, "cache", "bias_corrections.json")
 # ---------------------------------------------------------------------------
 
 _MAX_ERRORS_KEPT = 20        # rolling window per (player, stat)
-_MIN_DATA_POINTS = 3         # minimum picks before applying correction
+_MIN_DATA_POINTS = 1         # minimum picks before applying correction
 _DECAY = 0.85                # exponential decay per game (older = less weight)
 _MAX_CORRECTION = 8.0        # cap correction magnitude
+# Confidence dampening by sample size: correction is scaled down when few data points
+# 1 game → 30% weight, 2 games → 60%, 3+ games → 100%
+_CONFIDENCE = {1: 0.30, 2: 0.60}
 
 # ---------------------------------------------------------------------------
 # Persistence helpers
@@ -177,6 +180,10 @@ def get_correction(player: str, stat: str) -> float:
         return 0.0
 
     correction = weighted_sum / weight_total
+
+    # Dampen correction when few data points (avoid overcorrecting on 1 game)
+    confidence = _CONFIDENCE.get(n, 1.0)
+    correction *= confidence
 
     # Cap the correction
     correction = max(-_MAX_CORRECTION, min(_MAX_CORRECTION, correction))
