@@ -2189,6 +2189,8 @@ with ud_tab:
                 _ud_rows.append({
                     "Date":      p.get("date",""),
                     "Player":    p.get("player",""),
+                    "Team":      p.get("team",""),
+                    "Opponent":  p.get("opponent",""),
                     "Stat":      p.get("stat_label", p.get("stat","")),
                     "Line":      p.get("line",""),
                     "Direction": p.get("direction",""),
