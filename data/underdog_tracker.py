@@ -318,7 +318,20 @@ def auto_resolve_all() -> int:
             if gid not in game_cache:
                 game_cache[gid] = _get_player_stats_from_boxscore(gid)
 
-            player_data = game_cache[gid].get(player_lower)
+            box = game_cache[gid]
+            # Try exact match first, then fuzzy last-name + first-initial match
+            player_data = box.get(player_lower)
+            if player_data is None:
+                q_parts = player_lower.split()
+                q_last  = q_parts[-1] if q_parts else ""
+                q_first = q_parts[0][0] if q_parts else ""
+                for bname, bdata in box.items():
+                    b_parts = bname.split()
+                    b_last  = b_parts[-1] if b_parts else ""
+                    b_first = b_parts[0][0] if b_parts else ""
+                    if b_last == q_last and len(q_last) >= 3 and b_first == q_first:
+                        player_data = bdata
+                        break
             if player_data and stat in player_data:
                 actual_value = player_data[stat]
                 break

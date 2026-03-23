@@ -1273,7 +1273,7 @@ with nba_tab:
                     """, unsafe_allow_html=True)
 
             # ── Log this prediction ───────────────────────────────────────────────
-            log_col, share_col = st.columns(2)
+            log_col, ud_col, share_col = st.columns(3)
             with log_col:
                 if st.button("📝 Log This Pick", use_container_width=True,
                              help="Save prediction to track accuracy"):
@@ -1288,6 +1288,29 @@ with nba_tab:
                         is_home=(location=="Home"),
                     )
                     st.success("✅ Pick logged! Check Accuracy tab to track results.")
+            with ud_col:
+                if UNDERDOG_ENABLED and st.button("🐶 Log to Underdog", use_container_width=True,
+                             help="Log this pick to your Underdog tracker — prediction pre-filled"):
+                    _ud_dir = "OVER" if op > 50 else "UNDER"
+                    # find today's game_id for this player's team
+                    _ud_gid = next(
+                        (g.get("game_id") for g in today_slate
+                         if g.get("home_abbr") == p_row.get("team_abbreviation","")
+                         or g.get("away_abbr") == p_row.get("team_abbreviation","")),
+                        None
+                    )
+                    ud_log_pick(
+                        player    = result.player_name,
+                        team      = str(p_row.get("team_abbreviation", "")),
+                        opponent  = sel_opp,
+                        stat      = sel_target,
+                        stat_label= target_info["label"],
+                        line      = float(custom_line),
+                        direction = _ud_dir,
+                        predicted = float(tr.predicted_value),
+                        game_id   = _ud_gid,
+                    )
+                    st.success(f"🐶 Logged! {result.player_name} {_ud_dir} {custom_line} {target_info['label']} (model: {tr.predicted_value})")
             with share_col:
                 share_text = (
                     f"🏀 LineBreaker Prediction\n"
@@ -2108,15 +2131,14 @@ with ud_tab:
             with _ud_c2:
                 ud_line    = st.number_input("Underdog Line", min_value=0.0, max_value=200.0, value=20.0, step=0.5, key="ud_line")
                 ud_dir     = st.radio("Direction", ["OVER","UNDER"], horizontal=True, key="ud_dir")
-                ud_pred    = st.number_input("Your Model Prediction (optional)", min_value=0.0, max_value=200.0, value=0.0, step=0.5, key="ud_pred")
-            ud_notes = st.text_input("Notes (optional)", key="ud_notes")
+            ud_notes = st.text_input("Notes (optional)", placeholder="e.g. matchup, gut feeling…", key="ud_notes")
+            st.caption("💡 Tip: Run a prediction on NBA Props and click **🐶 Log to Underdog** to auto-fill the model's prediction.")
             if st.button("Log Pick", type="primary", key="ud_log_btn"):
-                _pred_val = ud_pred if ud_pred > 0 else None
                 _pid = ud_log_pick(
                     player=ud_player, team="", opponent="",
                     stat=ud_stat, stat_label=ud_stat_lbl,
                     line=ud_line, direction=ud_dir,
-                    predicted=_pred_val, notes=ud_notes,
+                    predicted=None, notes=ud_notes,
                 )
                 st.success(f"✅ Logged pick #{_pid[:8]} — {ud_player} {ud_dir} {ud_line} {ud_stat_lbl}")
                 st.rerun()
