@@ -83,10 +83,13 @@ def fetch_all_lineups(force_refresh: bool = False) -> pd.DataFrame:
             for ath in athletes:
                 name         = ath.get("athlete", {}).get("displayName", "")
                 starter      = ath.get("starter", False)
-                active       = ath.get("active", True)
                 did_not_play = ath.get("didNotPlay", False)
+                raw_stats    = ath.get("stats", [])
+                has_stats    = bool(raw_stats) and any(s not in ("", "--", "0:00") for s in raw_stats)
 
-                if did_not_play or not active:
+                # ESPN sets active=False for ALL players once a game is final —
+                # use didNotPlay + empty stats as the real inactive signal instead.
+                if did_not_play or not has_stats:
                     role = "inactive"
                 elif starter:
                     role = "starter"
@@ -96,7 +99,7 @@ def fetch_all_lineups(force_refresh: bool = False) -> pd.DataFrame:
                 rows.append({
                     "player_name":       name,
                     "team_abbr":         team_abbr,
-                    "is_starter":        starter and active and not did_not_play,
+                    "is_starter":        starter and has_stats and not did_not_play,
                     "role":              role,
                     "starter_confirmed": True,
                     "game_id":           game_id,
