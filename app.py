@@ -92,6 +92,17 @@ _favicon = f"data:image/png;base64,{_LOGO_B64}" if _LOGO_B64 else "🏀"
 st.set_page_config(page_title="LineBreaker", page_icon=_favicon,
                    layout="wide", initial_sidebar_state="collapsed")
 
+# ── Splash overlay — fades out automatically after 1.6s ──────────────────────
+if _LOGO_B64:
+    st.markdown(
+        f'<div id="lb-splash">'
+        f'<img src="data:image/png;base64,{_LOGO_B64}" alt="LineBreaker" />'
+        f'<div class="sp-sub">Beat the Line. Break the Line.</div>'
+        f'<div class="sp-bar"></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap');
@@ -109,22 +120,45 @@ section[data-testid="stMain"] { background:#080810 !important; }
 .lb-nav {
     display:flex; align-items:center; justify-content:space-between;
     background:#080810; border-bottom:1px solid #13131f;
-    padding:0 2rem; height:52px; position:sticky; top:0; z-index:100;
+    padding:0 2rem; height:68px; position:sticky; top:0; z-index:100;
 }
 .lb-logo { display:flex; align-items:center; gap:0.5rem; }
-.lb-logo img { height:42px; width:auto; object-fit:contain; display:block; }
+.lb-logo img { height:56px; width:auto; object-fit:contain; display:block; }
 .lb-logo span { font-family:'Bebas Neue',sans-serif; font-size:1.9rem; color:#f0672a; letter-spacing:0.05em; }
+
+/* Splash screen */
+#lb-splash {
+    position:fixed; inset:0; background:#080810; z-index:99999;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1.5rem;
+    animation: splashFade 0.6s ease-out 1.6s forwards;
+    pointer-events:none;
+}
+#lb-splash img { height:140px; width:auto; object-fit:contain;
+    animation: splashScale 0.7s cubic-bezier(0.22,1,0.36,1) 0.1s both; }
+#lb-splash .sp-sub {
+    font-size:0.62rem; font-weight:700; letter-spacing:0.28em; text-transform:uppercase;
+    color:#f0672a; opacity:0;
+    animation: splashFadeIn 0.5s ease 0.6s forwards;
+}
+#lb-splash .sp-bar {
+    width:60px; height:2px; background:#f0672a; border-radius:2px; opacity:0;
+    animation: splashBar 0.8s ease 0.9s forwards;
+}
+@keyframes splashScale  { from{transform:scale(0.8);opacity:0} to{transform:scale(1);opacity:1} }
+@keyframes splashFadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+@keyframes splashBar    { from{width:0;opacity:0} to{width:60px;opacity:0.6} }
+@keyframes splashFade   { from{opacity:1;pointer-events:none} to{opacity:0;pointer-events:none;visibility:hidden} }
 .lb-ticker-wrap { flex:1; overflow:hidden; margin:0 1.5rem;
     mask-image:linear-gradient(90deg,transparent,black 8%,black 92%,transparent); }
 .lb-ticker-track { display:inline-flex; gap:2rem; white-space:nowrap; animation:tick 40s linear infinite; }
 @keyframes tick { 0%{transform:translateX(0)} 100%{transform:translateX(-50%)} }
-.lb-tick { font-size:0.68rem; font-weight:500; color:#252535; letter-spacing:0.05em; }
+.lb-tick { font-size:0.68rem; font-weight:500; color:#3a3a55; letter-spacing:0.05em; }
 .lb-tick .h { color:#f0672a; font-weight:700; }
 .lb-tick .u { color:#4caf82; font-weight:700; }
 .lb-nav-right { display:flex; flex-direction:column; align-items:flex-end; gap:2px; }
 .lb-badge { font-size:0.58rem; font-weight:700; letter-spacing:0.14em; text-transform:uppercase;
     color:#f0672a; border:1px solid rgba(240,103,42,0.35); border-radius:4px; padding:0.18rem 0.5rem; }
-.lb-tagline { font-size:0.48rem; font-weight:600; letter-spacing:0.18em; text-transform:uppercase; color:#1a1a28; }
+.lb-tagline { font-size:0.48rem; font-weight:600; letter-spacing:0.18em; text-transform:uppercase; color:#2a2a3a; }
 
 /* Tabs flush */
 [data-testid="stTabs"] { margin-top:0 !important; }
@@ -673,23 +707,30 @@ with nba_tab:
     # ── Output ────────────────────────────────────────────────────────────────
     with right:
         if not run_btn:
+            _ph_logo = (
+                f"<img src='data:image/png;base64,{_LOGO_B64}' style='height:88px;width:auto;object-fit:contain;opacity:0.18;margin-bottom:1.2rem;display:block;'/>"
+                if _LOGO_B64 else
+                "<div class='lg'>LineBreaker</div>"
+            )
             ph = f"""<!DOCTYPE html><html><head>
             <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@600&display=swap' rel='stylesheet'>
             <style>*{{box-sizing:border-box;margin:0;}} body{{background:transparent;}}
             .w{{position:relative;overflow:hidden;border-radius:16px;background:#0a0a12;border:1px solid #13131f;
-                 min-height:480px;display:flex;align-items:center;justify-content:center;}}
+                 min-height:520px;display:flex;align-items:center;justify-content:center;}}
             .bg{{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}}
-            .i{{position:relative;z-index:1;text-align:center;padding:2rem;}}
+            .i{{position:relative;z-index:1;text-align:center;padding:2rem;display:flex;flex-direction:column;align-items:center;}}
             .lg{{font-family:'Bebas Neue',sans-serif;font-size:5rem;color:#f0672a;opacity:0.07;line-height:1;margin-bottom:1rem;}}
             .t{{font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:#1a1a28;}}
             .s{{font-size:10px;color:#111118;letter-spacing:1px;margin-top:6px;}}
+            .bar{{width:36px;height:2px;background:#f0672a;opacity:0.15;border-radius:2px;margin:1rem auto 0;}}
             </style></head><body>
             <div class='w'><div class='bg'>{_svg_court()}</div>
-            <div class='i'><div class='lg'>LineBreaker</div>
+            <div class='i'>{_ph_logo}
             <div class='t'>Select a player &amp; run prediction</div>
             <div class='s'>Beat the Line. Break the Line.</div>
+            <div class='bar'></div>
             </div></div></body></html>"""
-            components.html(ph, height=480, scrolling=False)
+            components.html(ph, height=520, scrolling=False)
 
         else:
             p_row = players_df[players_df["full_name"]==sel_player].iloc[0]
