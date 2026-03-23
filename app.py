@@ -2204,7 +2204,7 @@ with ud_tab:
             if _unresolved:
                 with st.expander(f"✏️  Manually Resolve ({len(_unresolved)} pending)"):
                     for _up in _unresolved:
-                        _mc1, _mc2, _mc3 = st.columns([3,2,1])
+                        _mc1, _mc2, _mc3, _mc4 = st.columns([3, 2, 1, 1])
                         with _mc1:
                             st.markdown(f"**{_up['player']}** {_up['direction']} {_up['line']} {_up.get('stat_label',_up.get('stat',''))}")
                         with _mc2:
@@ -2217,6 +2217,11 @@ with ud_tab:
                                 update_bias()
                                 st.success("Resolved!")
                                 st.rerun()
+                        with _mc4:
+                            if st.button("🗑️", key=f"ud_del_unres_{_up['id']}",
+                                         help="Delete this pick"):
+                                ud_delete_pick(_up["id"])
+                                st.rerun()
 
             # Show table
             st.dataframe(
@@ -2224,6 +2229,26 @@ with ud_tab:
                 use_container_width=True,
                 hide_index=True,
             )
+
+            # ── Manage / delete picks ─────────────────────────────────────────
+            with st.expander(f"🗑️  Manage Picks — delete any entry ({len(_ud_picks)} total)"):
+                st.caption("Click 🗑️ to permanently remove a pick (e.g. if you entered the wrong info).")
+                for _mp in _ud_picks:
+                    _outcome_badge = {"W": "✅ W", "L": "❌ L", "P": "➖ P"}.get(_mp.get("outcome"), "⏳ Pending")
+                    _dm1, _dm2 = st.columns([5, 1])
+                    with _dm1:
+                        _mp_label = (
+                            f"{_mp.get('date','')}  ·  **{_mp.get('player','')}**  "
+                            f"{_mp.get('direction','')} {_mp.get('line','')} "
+                            f"{_mp.get('stat_label', _mp.get('stat',''))}  ·  {_outcome_badge}"
+                        )
+                        st.markdown(_mp_label)
+                    with _dm2:
+                        if st.button("🗑️", key=f"ud_del_{_mp['id']}",
+                                     help="Delete this pick permanently"):
+                            ud_delete_pick(_mp["id"])
+                            st.success("Pick deleted.")
+                            st.rerun()
 
             # CSV export
             _ud_csv = _ud_df.drop(columns=["id"]).to_csv(index=False)
