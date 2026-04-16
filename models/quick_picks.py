@@ -155,6 +155,9 @@ def generate_quick_picks(top_n=10, min_confidence=None, targets=None) -> pd.Data
                             "l10_avg":    l10,
                             "trend":      trend,
                             "mae":        float(tr.model_mae),
+                            "ovr":        tr.ovr_score,
+                            "badges":     tr.skill_badges,
+                            "insight":    tr.scout_insight,
                         })
                     except Exception as e:
                         continue  # skip silently per player/target

@@ -75,6 +75,10 @@ class TargetResult:
     # Explainability + matchup context
     top_factors:      list  = field(default_factory=list)  # [(feature_name, importance_pct, human_label), ...]
     matchup_history:  dict  = field(default_factory=dict)
+    # Scout UI fields
+    ovr_score:        int   = 0     # 0-100 composite confidence score
+    skill_badges:     list  = field(default_factory=list)  # e.g. ["SCORER", "HOT HAND"]
+    scout_insight:    str   = ""    # e.g. "Brown faces MIN who allows top 3PM. Running HOT in L5."
 
 
 @dataclass
@@ -386,6 +390,88 @@ FEAT_LABELS = {
 }
 
 
+# ── Scout UI helpers ──────────────────────────────────────────────────────────
+
+def _compute_ovr(over_prob: float, edge_norm: float, consistency: float, auc: float) -> int:
+    """Composite 0-100 score: edge (35%) + prob confidence (30%) + consistency (20%) + AUC (15%)"""
+    edge_f   = min(edge_norm / 3.0, 1.0)
+    prob_f   = abs(over_prob - 0.5) * 2          # 0 at 50%, 1 at 0% or 100%
+    auc_f    = max(0.0, (auc - 0.5) / 0.5)
+    raw      = edge_f*0.35 + prob_f*0.30 + consistency*0.20 + auc_f*0.15
+    return max(1, min(99, round(raw * 100)))
+
+
+def _compute_badges(target: str, recent_avg_5: float, recent_avg_10: float,
+                    consistency: float, feature_row: pd.DataFrame) -> list:
+    """Generate skill badge list from player stats."""
+    badges = []
+    # Trend badges
+    if recent_avg_10 > 0:
+        ratio = recent_avg_5 / recent_avg_10
+        if ratio >= 1.12:
+            badges.append("HOT HAND")
+        elif ratio <= 0.88:
+            badges.append("COLD STREAK")
+
+    # Stat-specific role badges
+    def _roll(col):
+        if feature_row is not None and not feature_row.empty and col in feature_row.columns:
+            return float(feature_row[col].iloc[0])
+        return 0.0
+
+    pts5  = _roll("pts_roll5")
+    ast5  = _roll("ast_roll5")
+    reb5  = _roll("reb_roll5")
+    fg3m5 = _roll("fg3m_roll5")
+    stl5  = _roll("stl_roll5")
+    blk5  = _roll("blk_roll5")
+    min5  = _roll("min_roll5")
+
+    if pts5 >= 22:   badges.append("SCORER")
+    if ast5 >= 6:    badges.append("PLAYMAKER")
+    if reb5 >= 8:    badges.append("GLASS EATER")
+    if fg3m5 >= 2.5: badges.append("SNIPER")
+    if stl5 >= 1.5:  badges.append("LOCKDOWN")
+    if blk5 >= 1.5:  badges.append("SHOT BLOCKER")
+    if min5 >= 35:   badges.append("WORKHORSE")
+    if consistency >= 0.80: badges.append("CONSISTENT")
+    elif consistency <= 0.45: badges.append("VOLATILE")
+
+    return badges[:4]   # cap at 4 badges
+
+
+def _compute_scout_insight(player_name: str, target: str, direction: str,
+                            recent_avg_5: float, recent_avg_10: float,
+                            opponent: str, badges: list,
+                            matchup_history: dict) -> str:
+    """Generate a 1-2 sentence scout insight string."""
+    parts = []
+
+    # Trend context
+    if "HOT HAND" in badges and recent_avg_10 > 0:
+        pct = round((recent_avg_5 / recent_avg_10 - 1) * 100)
+        parts.append(f"Running {pct}% above season avg in L5.")
+    elif "COLD STREAK" in badges and recent_avg_10 > 0:
+        pct = round((1 - recent_avg_5 / recent_avg_10) * 100)
+        parts.append(f"Down {pct}% vs season avg in L5.")
+
+    # Matchup context
+    mh = matchup_history or {}
+    if mh.get("games", 0) >= 2:
+        avg = mh.get("avg", 0)
+        hr  = mh.get("hit_rate", 0)
+        parts.append(f"Averages {avg:.1f} vs {opponent} ({int(hr*100)}% hit rate, {mh['games']}G).")
+
+    # Direction hook
+    if not parts:
+        if direction == "OVER":
+            parts.append(f"Model projects {player_name.split()[0]} above the line tonight.")
+        else:
+            parts.append(f"Model projects {player_name.split()[0]} below the line tonight.")
+
+    return " ".join(parts[:2])
+
+
 # ── Core prediction ───────────────────────────────────────────────────────────
 
 def predict(
@@ -510,6 +596,16 @@ def predict(
             except Exception:
                 matchup_hist = {}
 
+        _auc_i     = target_meta.get("cls_cv_auc", 0.0)
+        _edge_ni   = abs(predicted_value - threshold) / (mae if mae > 0 else 1.0)
+        ovr_i      = _compute_ovr(adj_over_prob, _edge_ni, consistency, _auc_i)
+        dir_i      = "OVER" if adj_over_prob >= 0.5 else "UNDER"
+        badges_i   = _compute_badges(target, recent_avg_5, recent_avg_10,
+                                     consistency, feat_row)
+        insight_i  = _compute_scout_insight(player_name, target, dir_i,
+                                            recent_avg_5, recent_avg_10,
+                                            opponent_name, badges_i, matchup_hist)
+
         target_results[target] = TargetResult(
             target            = target,
             predicted_value   = round(predicted_value, 1),
@@ -520,12 +616,15 @@ def predict(
             recent_avg_5      = recent_avg_5,
             recent_avg_10     = recent_avg_10,
             model_mae         = target_meta.get("reg_cv_mae", 0.0),
-            model_auc         = target_meta.get("cls_cv_auc", 0.0),
+            model_auc         = _auc_i,
             consistency_score = consistency,
             hit_rate_l5       = hit_rate_label,
             bet_size          = bet_sz,
             top_factors       = top_factors,
             matchup_history   = matchup_hist,
+            ovr_score         = ovr_i,
+            skill_badges      = badges_i,
+            scout_insight     = insight_i,
         )
 
     # ── Injury + lineup adjustment ───────────────────────────────────────────
@@ -563,6 +662,13 @@ def predict(
             mae_i    = tr.model_mae if tr.model_mae > 0 else 1.0
             edge_ni  = abs(adjusted - tr.threshold) / mae_i
             conf_i   = _confidence_label_v2(adj_over, tr.consistency_score, 5)
+            ovr_adj  = _compute_ovr(adj_over, edge_ni, tr.consistency_score, tr.model_auc)
+            dir_adj  = "OVER" if adj_over >= 0.5 else "UNDER"
+            badges_adj = _compute_badges(tr.target, tr.recent_avg_5, tr.recent_avg_10,
+                                         tr.consistency_score, feat_row)
+            insight_adj = _compute_scout_insight(player_name, tr.target, dir_adj,
+                                                 tr.recent_avg_5, tr.recent_avg_10,
+                                                 opponent_name, badges_adj, tr.matchup_history)
             target_results[target] = TargetResult(
                 target            = tr.target,
                 predicted_value   = adjusted,
@@ -579,6 +685,9 @@ def predict(
                 bet_size          = _bet_size(conf_i, edge_ni),
                 top_factors       = tr.top_factors,
                 matchup_history   = tr.matchup_history,
+                ovr_score         = ovr_adj,
+                skill_badges      = badges_adj,
+                scout_insight     = insight_adj,
             )
 
     return PredictionResult(

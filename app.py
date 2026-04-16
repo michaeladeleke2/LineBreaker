@@ -972,6 +972,29 @@ with nba_tab:
                           f'border-radius:4px;padding:2px 7px;font-size:9px;font-weight:700;letter-spacing:1px;">{hit_lbl}</span>'
                           if hit_lbl else "")
 
+            # OVR badge + skill badges + scout insight for scout UI
+            _ovr        = getattr(tr, "ovr_score", 0)
+            _ovr_color  = "#4caf82" if _ovr >= 72 else "#f0672a" if _ovr >= 50 else "#5a5a7a"
+            _badges_raw = getattr(tr, "skill_badges", []) or []
+            _insight    = getattr(tr, "scout_insight", "") or ""
+            _badges_html = "".join(
+                f'<span style="background:rgba(240,103,42,0.15);color:#f0672a;font-size:0.58rem;font-weight:700;'
+                f'letter-spacing:0.1em;padding:0.2rem 0.5rem;border-radius:4px;text-transform:uppercase;">{b}</span>'
+                for b in _badges_raw
+            )
+            ovr_row_html = (
+                f'<div style="display:inline-flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap;">'
+                f'<div style="background:{_ovr_color};color:#fff;font-family:\'Bebas Neue\',sans-serif;'
+                f'font-size:1.1rem;padding:0.2rem 0.6rem;border-radius:6px;letter-spacing:0.08em;">'
+                f'OVR {_ovr}</div>{_badges_html}</div>'
+            )
+            scout_insight_html = (
+                f'<div style="background:#0d0d15;border-left:3px solid #f0672a;padding:0.6rem 1rem;'
+                f'border-radius:0 8px 8px 0;margin:0.5rem 0;font-size:0.78rem;color:#9a9ab0;font-style:italic;">'
+                f'{_insight}</div>'
+                if _insight else ""
+            )
+
             html = f"""<!DOCTYPE html><html><head>
             <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
             <style>
@@ -1040,6 +1063,7 @@ with nba_tab:
                             <div class="nm">{result.player_name}</div>
                             <div class="sb">{loc}&nbsp;<span class="opp">{sel_opp}</span>&nbsp;&middot;&nbsp;{rest_days}d rest&nbsp;&middot;&nbsp;{location}{inj}{lu_badge}</div>
                             <div class="badges">{vl_badge}{hit_badge}</div>
+                            {ovr_row_html}
                         </div>
                     </div>
                     <span class="cf"><span class="cd"></span>{tr.confidence_label}</span>
@@ -1103,6 +1127,7 @@ with nba_tab:
                         </div>
                     </div>
                     {chart_block}
+                    {scout_insight_html}
                     <div class="meta">
                         <span>AUC {tr.model_auc}</span>
                         <span style="color:#0a0a16">&middot;</span>
@@ -1637,116 +1662,125 @@ with picks_tab:
         if display_df.empty:
             st.info(f"No {qp_dir_filter} picks in today's slate. Try removing the direction filter.")
         else:
-            # ── Top 3 Hero Picks ──────────────────────────────────────────
-            top3 = display_df.head(3)
-            hero_cols = st.columns(len(top3))
-            for idx, (_, row) in enumerate(top3.iterrows()):
-                pc_h    = TEAM_COLORS.get(row["team"], "#f0672a")
-                conf_c  = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
-                arrow_h = "⬆" if row["direction"] == "OVER" else "⬇"
-                try:
-                    r2,g2,b2 = int(pc_h[1:3],16),int(pc_h[3:5],16),int(pc_h[5:7],16)
-                    bg_h = f"rgba({r2},{g2},{b2},0.08)"
-                except: bg_h = "#0a0a12"
-                # get player ID for headshot
-                p_match = players_df[players_df["full_name"] == row["player"]]
-                hs_h = _headshot(int(p_match.iloc[0]["id"])) if not p_match.empty else ""
-                with hero_cols[idx]:
-                    components.html(f"""<!DOCTYPE html><html><head>
-                    <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@500;600;700&display=swap' rel='stylesheet'>
-                    <style>*{{box-sizing:border-box;margin:0;padding:0;}} body{{background:transparent;font-family:'Inter',sans-serif;}}
-                    .c{{background:{bg_h};border:1px solid {pc_h}33;border-radius:12px;border-top:2px solid {pc_h};
-                         padding:14px;overflow:hidden;position:relative;}}
-                    .rank{{font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:{pc_h};margin-bottom:8px;}}
-                    .hs{{width:42px;height:42px;border-radius:50%;border:2px solid {pc_h};object-fit:cover;object-position:top;
-                          background:#0d0d15;float:right;margin-left:8px;}}
-                    .nm{{font-size:13px;font-weight:700;color:#f0ede8;line-height:1.2;}}
-                    .tm{{font-size:9px;color:#2a2a3a;margin-top:2px;}}
-                    .prop{{font-family:'Bebas Neue',sans-serif;font-size:28px;color:{pc_h};line-height:1;margin:10px 0 4px;}}
-                    .det{{font-size:9px;color:#252535;}}
-                    .prob{{font-size:11px;font-weight:700;color:{conf_c};margin-top:6px;}}
+            # ── Tiered Pick Cards (LOCKS / LEAN / FLIER) ─────────────────
+
+            def _ovr_color(ovr):
+                if ovr >= 72: return "#4caf82"
+                if ovr >= 50: return "#f0672a"
+                return "#5a5a7a"
+
+            def _tier_label(ovr):
+                if ovr >= 72: return "LOCK"
+                if ovr >= 50: return "LEAN"
+                return "FLIER"
+
+            def _make_pick_card(row, rank):
+                ovr      = int(row.get("ovr", 0))
+                badges   = row.get("badges", []) or []
+                insight  = row.get("insight", "") or ""
+                pc_c     = TEAM_COLORS.get(row["team"], "#f0672a")
+                border_c = _ovr_color(ovr)
+                tier_lbl = _tier_label(ovr)
+                arrow    = "⬆" if row["direction"] == "OVER" else "⬇"
+                badges_html = "".join(
+                    f'<span style="background:rgba(240,103,42,0.15);color:#f0672a;font-size:0.52rem;'
+                    f'font-weight:700;letter-spacing:0.08em;padding:0.15rem 0.45rem;border-radius:4px;'
+                    f'text-transform:uppercase;white-space:nowrap;">{b}</span>'
+                    for b in badges
+                )
+                insight_html = (
+                    f'<div style="font-size:0.62rem;color:#6a6a8a;font-style:italic;'
+                    f'margin-top:6px;line-height:1.4;">{insight}</div>'
+                    if insight else ""
+                )
+                return f"""<!DOCTYPE html><html><head>
+                    <link href='https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap' rel='stylesheet'>
+                    <style>*{{box-sizing:border-box;margin:0;padding:0;}}
+                    body{{background:transparent;font-family:'Inter',sans-serif;}}
+                    .card{{background:#0d0d15;border:1px solid #1a1a28;border-radius:12px;
+                            border-left:3px solid {border_c};padding:12px 14px;}}
+                    .top-row{{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;}}
+                    .nm{{font-family:'Bebas Neue',sans-serif;font-size:1.25rem;color:#f0ede8;letter-spacing:0.04em;line-height:1;}}
+                    .tm{{font-size:0.6rem;color:#4a4a6a;margin-top:2px;letter-spacing:0.06em;text-transform:uppercase;}}
+                    .ovr-badge{{background:{border_c};color:#fff;font-family:'Bebas Neue',sans-serif;
+                                 font-size:0.85rem;padding:2px 7px;border-radius:5px;letter-spacing:0.08em;
+                                 flex-shrink:0;line-height:1.3;}}
+                    .dir-line{{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:{pc_c};
+                                line-height:1;margin:6px 0 4px;}}
+                    .badges-row{{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;}}
+                    .pred-row{{display:flex;justify-content:space-between;align-items:center;margin-top:7px;
+                                padding-top:7px;border-top:1px solid #1a1a28;}}
+                    .pred-lbl{{font-size:0.58rem;color:#4a4a6a;text-transform:uppercase;letter-spacing:0.1em;}}
+                    .pred-val{{font-family:'Bebas Neue',sans-serif;font-size:1rem;color:#e8e6e0;}}
+                    .tier-lbl{{font-size:0.52rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;
+                                color:{border_c};}}
                     </style></head><body>
-                    <div class='c'>
-                        <div class='rank'>#{idx+1} Best Edge</div>
-                        {"<img class='hs' src='" + hs_h + "' onerror=\"this.style.display='none'\"/>" if hs_h else ""}
-                        <div class='nm'>{row["player"].split()[-1]}</div>
-                        <div class='tm'>{row["team"]} &middot; {row["opponent"]}</div>
-                        <div class='prop'>{arrow_h} {row["short"]}</div>
-                        <div class='det'>Proj {row["predicted"]} &middot; Line {row["line"]}</div>
-                        <div class='prob'>{row["direction"]} {row["over_prob"]}%</div>
-                    </div></body></html>""", height=160, scrolling=False)
-
-            st.markdown(f'<div style="font-size:0.58rem;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#1e1e2e;margin:1rem 0 0.6rem;">All {len(display_df)} picks — ranked by edge</div>', unsafe_allow_html=True)
-
-            # ── Full ranked list ──────────────────────────────────────────
-            try:
-                for rank, (_, row) in enumerate(display_df.iterrows(), 1):
-                    arrow    = "⬆" if row["direction"] == "OVER" else "⬇"
-                    pc       = TEAM_COLORS.get(row["team"], "#f0672a")
-                    conf_c   = {"High":"#4caf82","Medium":"#d4b44a","Low":"#e05a5a"}.get(row["confidence"],"#f0672a")
-                    edge_w   = min(100, int(row["edge"] * 12))
-                    trend    = row.get("trend", "→")
-                    l5       = row.get("l5_avg", 0)
-                    l10      = row.get("l10_avg", 0)
-                    # get headshot
-                    p_match  = players_df[players_df["full_name"] == row["player"]]
-                    hs_url   = _headshot(int(p_match.iloc[0]["id"])) if not p_match.empty else ""
-                    try:
-                        r2,g2,b2 = int(pc[1:3],16),int(pc[3:5],16),int(pc[5:7],16)
-                        pc_bg = f"rgba({r2},{g2},{b2},0.05)"
-                    except: pc_bg = "#0a0a12"
-
-                    hs_img = (f'<img src="{hs_url}" style="width:38px;height:38px;border-radius:50%;'
-                              f'border:1.5px solid {pc};object-fit:cover;object-position:top;'
-                              f'background:#0d0d15;flex-shrink:0;" onerror="this.style.display=\'none\'"/>') if hs_url else ""
-
-                    st.markdown(f"""
-                    <div style="background:{pc_bg};border:1px solid #0d0d15;border-radius:10px;
-                                padding:0.75rem 1rem;margin-bottom:0.4rem;border-left:2px solid {pc};
-                                display:flex;align-items:center;gap:0.9rem;">
-                        <div style="font-size:0.6rem;font-weight:700;color:#1e1e2e;min-width:16px;text-align:center;">{rank}</div>
-                        {hs_img}
-                        <div style="flex:1;min-width:0;">
-                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px;">
-                                <span style="font-size:0.88rem;font-weight:700;color:#f0ede8;">{row["player"]}</span>
-                                <span style="background:{conf_c}18;color:{conf_c};border:1px solid {conf_c}33;
-                                             border-radius:20px;padding:1px 7px;font-size:8px;font-weight:700;
-                                             letter-spacing:1px;flex-shrink:0;">{row["confidence"].upper()}</span>
+                    <div class='card'>
+                        <div class='top-row'>
+                            <div>
+                                <div class='nm'>{row["player"].split()[-1]}</div>
+                                <div class='tm'>{row["team"]} @ {row["opponent"]}</div>
                             </div>
-                            <div style="display:flex;align-items:center;gap:0.8rem;">
-                                <span style="font-family:'Bebas Neue',sans-serif;font-size:1.6rem;color:{pc};line-height:1;">{arrow} {row["short"]}</span>
-                                <div style="flex:1;">
-                                    <div style="font-size:0.68rem;color:#2a2a3a;">
-                                        {row["team"]}&nbsp;vs&nbsp;{row["opponent"]}&nbsp;&middot;&nbsp;
-                                        Proj <strong style="color:#e8e6e0;">{row["predicted"]}</strong>&nbsp;&middot;&nbsp;
-                                        Line <strong style="color:#e8e6e0;">{row["line"]}</strong>&nbsp;&middot;&nbsp;
-                                        <strong style="color:{pc};">{row["direction"]} {row["over_prob"]}%</strong>
-                                        &nbsp;&middot;&nbsp;<span style="color:#2a2a3a;">{trend}</span>
-                                    </div>
-                                    <div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
-                                        <span style="font-size:8px;color:#4a4a6a;text-transform:uppercase;letter-spacing:1px;">Edge</span>
-                                        <div style="flex:1;height:2px;background:#1a1a28;border-radius:2px;overflow:hidden;">
-                                            <div style="height:100%;width:{edge_w}%;background:{pc};border-radius:2px;"></div>
-                                        </div>
-                                        <span style="font-size:9px;font-weight:700;color:{pc};">{row["edge"]:.1f}x</span>
-                                        <span style="font-size:8px;color:#4a4a6a;">L5 {l5} &middot; L10 {l10}</span>
-                                    </div>
-                                </div>
-                            </div>
+                            <div class='ovr-badge'>OVR {ovr}</div>
                         </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    # Add to Parlay button (inline, small)
-                    if st.button(f"➕ Parlay", key=f"qp_parlay_{rank}_{row['player'][:6]}",
-                                 help=f"Add {row['player']} {row['short']} to parlay"):
-                        parlay_legs = st.session_state.get("parlay_legs", [])
-                        leg = {"player": row["player"], "stat": row["short"],
-                               "line": row["line"], "dir": row["direction"],
-                               "prob": row["over_prob"]/100, "conf": row["confidence"]}
-                        if not any(l["player"]==leg["player"] and l["stat"]==leg["stat"] for l in parlay_legs):
-                            parlay_legs.append(leg)
-                            st.session_state["parlay_legs"] = parlay_legs
-                            st.rerun()
+                        <div class='dir-line'>{arrow} {row["direction"]} {row["line"]} {row["short"]}</div>
+                        <div class='badges-row'>{badges_html}</div>
+                        {insight_html}
+                        <div class='pred-row'>
+                            <div>
+                                <div class='pred-lbl'>Projected</div>
+                                <div class='pred-val'>{row["predicted"]}</div>
+                            </div>
+                            <div>
+                                <div class='pred-lbl'>Confidence</div>
+                                <div class='pred-val' style="color:{border_c};">{row["over_prob"]}%</div>
+                            </div>
+                            <div class='tier-lbl'>{tier_lbl}</div>
+                        </div>
+                    </div></body></html>"""
+
+            # Split into tiers
+            locks  = display_df[display_df["ovr"] >= 72] if "ovr" in display_df.columns else pd.DataFrame()
+            leans  = display_df[(display_df["ovr"] >= 50) & (display_df["ovr"] < 72)] if "ovr" in display_df.columns else pd.DataFrame()
+            fliers = display_df[display_df["ovr"] < 50] if "ovr" in display_df.columns else display_df
+
+            try:
+                for tier_name, tier_df, tier_icon in [
+                    ("LOCKS — High confidence, strong edge", locks, "🔒"),
+                    ("LEAN — Solid plays, model favors", leans, "⚡"),
+                    ("FLIER — Worth a look, higher variance", fliers, "🎲"),
+                ]:
+                    if tier_df.empty:
+                        continue
+                    st.markdown(
+                        f'<div style="font-size:0.7rem;font-weight:700;letter-spacing:0.14em;'
+                        f'text-transform:uppercase;color:#f0672a;margin:1.2rem 0 0.5rem;">'
+                        f'{tier_icon} {tier_name}</div>',
+                        unsafe_allow_html=True
+                    )
+                    rows_list = list(tier_df.iterrows())
+                    for i in range(0, len(rows_list), 3):
+                        chunk = rows_list[i:i+3]
+                        cols  = st.columns(len(chunk))
+                        for col_idx, (_, row) in enumerate(chunk):
+                            rank = i + col_idx + 1
+                            card_html = _make_pick_card(row, rank)
+                            card_height = 230 if row.get("insight") else 200
+                            with cols[col_idx]:
+                                components.html(card_html, height=card_height, scrolling=False)
+                                if st.button(
+                                    "➕ Parlay",
+                                    key=f"qp_parlay_{tier_name[:4]}_{rank}_{row['player'][:6]}",
+                                    help=f"Add {row['player']} {row['short']} to parlay"
+                                ):
+                                    parlay_legs = st.session_state.get("parlay_legs", [])
+                                    leg = {"player": row["player"], "stat": row["short"],
+                                           "line": row["line"], "dir": row["direction"],
+                                           "prob": row["over_prob"]/100, "conf": row["confidence"]}
+                                    if not any(l["player"]==leg["player"] and l["stat"]==leg["stat"] for l in parlay_legs):
+                                        parlay_legs.append(leg)
+                                        st.session_state["parlay_legs"] = parlay_legs
+                                        st.rerun()
             except Exception as e:
                 import traceback
                 st.error(f"Display error: {e}")
